@@ -234,13 +234,17 @@
 
       <div class="card">
         <h2>Tasks</h2>
+        <div class="chips" style="margin-bottom: 8px">
+          <button class="chip on" type="button" id="mode-task">Task</button>
+          <button class="chip" type="button" id="mode-event">Event</button>
+        </div>
         <div class="row">
-          <input type="text" id="task-line" placeholder="ส่งรายงาน #egat !2 พรุ่งนี้" enterkeyhint="done" />
+          <input type="text" id="task-line" placeholder="ส่งรายงาน #egat p2 พรุ่งนี้" enterkeyhint="done" />
           <button class="primary" id="task-add" style="padding: 13px 16px">+</button>
         </div>
         <p class="hint">
-          Same line syntax as the desktop box: <b>#tag</b>, <b>!1&ndash;!4</b>, a date or พรุ่งนี้.
-          Prefix with <b>@</b> to file it as an event instead.
+          Same line as the desktop box, parsed on the PC: <b>#tag</b>, <b>@project</b>,
+          <b>p1&ndash;p4</b>, a time, and a date or พรุ่งนี้ / อาทิตย์หน้า.
         </p>
         <div id="tasks"></div>
       </div>
@@ -734,7 +738,18 @@
         for (const [id, rec] of Object.entries(edits.done)) {
           actions.push({ kind: "todoDone", id: id, done: rec.v, at: rec.at });
         }
-        return { v: 1, id: rid(), filedAt: filedAt, device: "phone", actions: actions };
+        // filedDate as well as filedAt: an instant is not a date. 22:40 UTC on Sunday is already
+        // Monday in Bangkok, so a PC deriving the day from the timestamp can push a Sunday-evening
+        // check-in into the next ISO week and refuse it as backdated. The phone knows which day
+        // Dan thought it was; it says so rather than leaving it to be inferred.
+        return {
+          v: 1,
+          id: rid(),
+          filedAt: filedAt,
+          filedDate: todayStr(),
+          device: "phone",
+          actions: actions,
+        };
       }
 
       function commitToOverlay() {
@@ -787,14 +802,21 @@
       function setStatus(text) { $("status").textContent = text; }
 
       // ── quick add ───────────────────────────────────────────────────────────
+      // Task or event is a pair of buttons rather than a prefix character, because every prefix
+      // worth typing is already taken: "@" means a project and "#" a tag, and the parser on the
+      // PC is the same one the desktop box uses.
+      let addMode = "task";
+      function setAddMode(m) {
+        addMode = m;
+        $("mode-task").className = "chip" + (m === "task" ? " on" : "");
+        $("mode-event").className = "chip" + (m === "event" ? " on" : "");
+      }
+
       function addTask() {
         const input = $("task-line");
-        let line = input.value.trim();
+        const line = input.value.trim();
         if (!line) return;
-        let mode = "task";
-        if (line.startsWith("@")) { mode = "event"; line = line.slice(1).trim(); }
-        if (!line) return;
-        edits.tasks.push({ id: rid(), line: line, mode: mode, at: new Date().toISOString() });
+        edits.tasks.push({ id: rid(), line: line, mode: addMode, at: new Date().toISOString() });
         input.value = "";
         render();
       }
@@ -838,6 +860,8 @@
       $("btn-settings").onclick = openSetup;
       $("btn-save").onclick = doSave;
       $("task-add").onclick = addTask;
+      $("mode-task").onclick = () => setAddMode("task");
+      $("mode-event").onclick = () => setAddMode("event");
       $("task-line").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTask(); } });
       $("btn-refresh").onclick = async () => {
         window.__lastError = "";
@@ -848,6 +872,15 @@
       };
 
       // ── boot ────────────────────────────────────────────────────────────────
+      // The queue means a tap survives having no signal — but only if the page loads at all.
+      // Without this, opening the app in a basement gives the browser's offline error and the
+      // capture never happens. See sw.js.
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("./sw.js").catch(() => {
+          /* an old browser, or opened from file:// — the app still works online */
+        });
+      }
+
       (async function boot() {
         render();
         if (!cfg.token) { openSetup(); return; }
