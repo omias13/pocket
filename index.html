@@ -106,6 +106,10 @@
       }
       .chip.day { flex-direction: column; gap: 0; padding: 5px 11px; line-height: 1.15; }
       .chip.day small { font-size: 10px; opacity: 0.7; }
+      .chip.day .seen {
+        width: 5px; height: 5px; border-radius: 50%; margin-top: 3px;
+        background: color-mix(in oklab, currentColor 22%, transparent);
+      }
 
       .habit { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); }
       .habit:first-of-type { border-top: 0; }
@@ -204,6 +208,43 @@
       .banner.err { background: color-mix(in oklab, var(--bad) 16%, var(--card)); border: 1px solid var(--bad); }
       .banner.warn { background: color-mix(in oklab, var(--warn) 16%, var(--card)); border: 1px solid var(--warn); }
       .empty { color: var(--muted-foreground); font-size: 14px; padding: 4px 0; }
+
+      /* Home / Check in. A segmented control rather than a nav bar: there are two, they are
+         siblings, and the phone has no room for chrome that only says where you are. */
+      .seg { display: flex; gap: 3px; background: var(--muted); border-radius: 999px; padding: 3px; margin: 10px 0 4px; }
+      .seg button {
+        flex: 1; border: 0; background: none; color: var(--muted-foreground); font-family: inherit;
+        font-size: 14px; font-weight: 550; padding: 9px 10px; border-radius: 999px; cursor: pointer;
+      }
+      .seg button.on { background: var(--card); color: var(--foreground); box-shadow: 0 1px 2px rgb(0 0 0 / 0.14); }
+
+      .alerts { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); overflow: hidden; margin: 10px 0; }
+      .alert {
+        display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+        padding: 11px 13px; font-family: inherit; font-size: 13.5px; color: var(--foreground);
+        background: none; border: 0; border-top: 1px solid var(--border);
+      }
+      .alert:first-child { border-top: 0; }
+      .alert .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+      .alert .arrow { margin-left: auto; color: var(--muted-foreground); flex: none; }
+      .alert.plain { color: var(--muted-foreground); }
+      .clear {
+        border: 1px solid color-mix(in oklab, var(--good) 40%, transparent);
+        background: color-mix(in oklab, var(--good) 10%, var(--card));
+        border-radius: var(--radius); padding: 12px 13px; font-size: 13.5px; margin: 10px 0;
+      }
+
+      .leaf {
+        display: block; width: 100%; text-align: left; font-family: inherit; color: inherit;
+        background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+        padding: 12px 14px; margin: 8px 0; cursor: pointer;
+      }
+      .leaf .name { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted-foreground); }
+      .leaf .top { display: flex; align-items: baseline; gap: 7px; margin-top: 5px; }
+      .leaf .val { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+      .leaf .unit { font-size: 12px; color: var(--muted-foreground); }
+      .leaf .sub { font-size: 12.5px; color: var(--muted-foreground); margin-top: 3px; line-height: 1.35; }
+      .foot { font-size: 11.5px; color: var(--muted-foreground); margin: 16px 0 0; line-height: 1.5; }
     </style>
   </head>
   <body>
@@ -217,6 +258,18 @@
     <main>
       <div id="banners"></div>
 
+      <div class="seg" id="views">
+        <button type="button" id="view-home" class="on">Home</button>
+        <button type="button" id="view-checkin">Check in</button>
+      </div>
+
+      <section id="pane-home">
+        <div id="attention"></div>
+        <div id="leaves"></div>
+        <p class="foot" id="home-foot"></p>
+      </section>
+
+      <section id="pane-checkin" hidden>
       <div class="card" id="day-card">
         <h2>Day</h2>
         <div class="chips" id="days"></div>
@@ -232,7 +285,7 @@
         <div id="habits"></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="tasks-card">
         <h2>Tasks</h2>
         <div class="chips" style="margin-bottom: 8px">
           <button class="chip on" type="button" id="mode-task">Task</button>
@@ -248,6 +301,7 @@
         </p>
         <div id="tasks"></div>
       </div>
+      </section>
     </main>
 
     <div class="savebar">
@@ -314,6 +368,14 @@
       let selectedDate = todayStr();
       let selectedRoutine = routineForHour(new Date().getHours());
       let busy = false;
+      /**
+       * "home" or "checkin". Opens on home, the same way Omias does.
+       *
+       * A form on its own cannot say whether anything is wrong — and this app is opened in the
+       * gaps of a day, where the question is usually "is there anything I owe" rather than "let me
+       * enter today's water". Home answers that in one glance and every line of it is a way in.
+       */
+      let view = "home";
 
       // ── dates ───────────────────────────────────────────────────────────────
       // A declaration, not `const pad = …`: the state above calls todayStr() during parse, and a
@@ -325,12 +387,22 @@
         const [y, m, d] = iso.split("-").map(Number);
         return ymd(new Date(y, m - 1, d + n));
       }
-      /** Monday-first, like everywhere else in Omias. */
-      function weekDays(today) {
+      /**
+       * How far back a day may be filled in, on top of this week so far.
+       *
+       * Must match BACKFILL_DAYS in src/lib/habits.ts and lib/pocket.ts. Offering a day here that
+       * the PC then refuses is the worst possible failure for this app: the tick looks saved, the
+       * phone shows it, and it quietly never lands.
+       */
+      const BACKFILL_DAYS = 3;
+
+      /** This week so far, or the last few days — whichever reaches further back. Oldest first. */
+      function editableDays(today) {
         const [y, m, d] = today.split("-").map(Number);
         const dow = (new Date(y, m - 1, d).getDay() + 6) % 7;
+        const span = Math.max(dow, BACKFILL_DAYS);
         const out = [];
-        for (let i = 0; i <= dow; i++) out.push(addDays(today, -dow + i));
+        for (let i = 0; i <= span; i++) out.push(addDays(today, -span + i));
         return out;
       }
       /** Evening runs past midnight: a check-in filed at 00:30 belongs to the day that just ended. */
@@ -493,14 +565,27 @@
 
       function render() {
         renderBanners();
+        renderHome();
         renderDays();
         renderRoutines();
         renderHabits();
         renderTasks();
+        $("pane-home").hidden = view !== "home";
+        $("pane-checkin").hidden = view !== "checkin";
+        $("view-home").className = view === "home" ? "on" : "";
+        $("view-checkin").className = view === "checkin" ? "on" : "";
         const n = pendingCount();
         $("btn-save").disabled = n === 0 || busy;
         $("btn-save").textContent = busy ? "Saving…" : n ? "Save " + n : "Save";
-        $("hdr-sub").textContent = snap ? prettyDate(selectedDate) : "not connected";
+        $("hdr-sub").textContent = snap
+          ? prettyDate(view === "home" ? todayStr() : selectedDate)
+          : "not connected";
+      }
+
+      function setView(v) {
+        view = v;
+        window.scrollTo(0, 0);
+        render();
       }
 
       function renderBanners() {
@@ -530,16 +615,228 @@
         }
       }
 
+      // ── home ────────────────────────────────────────────────────────────────
+      // The same summary Omias shows on its own home page, minus everything that would have to
+      // travel to get here. What this phone can read is a check-in and a task list, so that is
+      // what home is about; money, projects, stock and the VM stay on the PC by design.
+
+      /** Mirrors isHabitLogged in src/lib/habits.ts: "no" is an answer, blank is not. */
+      function isLogged(v) {
+        if (v === undefined || v === null || v === "") return false;
+        if (Array.isArray(v)) return v.length > 0;
+        return true;
+      }
+
+      /** Was anything at all recorded for this day — by either machine, or by this phone. */
+      function dayHasEntry(date) {
+        const fromPc = snap && snap.days && snap.days[date];
+        if (fromPc && Object.keys(fromPc).length) return true;
+        // A layer holding only cleared fields is not an entry: un-ticking the one habit you had
+        // answered should take the day back to blank, not leave it looking filled in.
+        const answered = (layer) =>
+          layer[date] && Object.values(layer[date]).some((r) => r.v !== undefined && r.v !== null);
+        return !!(answered(edits.days) || answered(overlay.days));
+      }
+
+      /** How much history the snapshot carries — the streak cannot be counted past it. */
+      const SNAPSHOT_DAYS = 14;
+
+      /**
+       * Days in a row with an entry, counted the way Omias counts it: showing up, not being perfect.
+       * Today only breaks the chain once it is over, so an unfilled today reads as the streak so far.
+       */
+      function streakInfo() {
+        const t = todayStr();
+        let n = dayHasEntry(t) ? 1 : 0;
+        let cursor = addDays(t, -1);
+        let steps = 0;
+        while (steps < SNAPSHOT_DAYS && dayHasEntry(cursor)) {
+          n++;
+          cursor = addDays(cursor, -1);
+          steps++;
+        }
+        return { n: n, capped: steps === SNAPSHOT_DAYS };
+      }
+
+      /** Mirrors sectionise in src/lib/todo-view.ts. A task lands in exactly one bucket. */
+      function taskSections() {
+        const today = todayStr();
+        const open = ((snap && snap.todos) || []).filter((t) => !taskDone(t));
+        const overdue = open.filter((t) => (t.due && t.due < today) || (t.deadline && t.deadline < today));
+        const taken = new Set(overdue.map((t) => t.id));
+        const rest = open.filter((t) => !taken.has(t.id));
+        return {
+          overdue: overdue,
+          due: rest.filter((t) => t.due === today),
+          undated: rest.filter((t) => !t.due),
+        };
+      }
+
+      function goCheckin(date) {
+        if (date) {
+          selectedDate = date;
+          // Backfilling a day you missed means answering all of it, so a past day opens on "all"
+          // rather than on whichever routine the clock happens to be in now.
+          selectedRoutine = date === todayStr() ? routineForHour(new Date().getHours()) : "all";
+        }
+        setView("checkin");
+      }
+
+      function goTasks() {
+        setView("checkin");
+        const card = $("tasks-card");
+        if (card && card.scrollIntoView) card.scrollIntoView({ block: "start" });
+      }
+
+      /** Omias caps its attention band too: a list long enough to scroll is a backlog, not an alert. */
+      const ALERT_CAP = 5;
+
+      function renderHome() {
+        const box = $("attention");
+        const cards = $("leaves");
+        box.textContent = "";
+        cards.textContent = "";
+        $("home-foot").textContent = "";
+        if (!snap) {
+          box.append(el("p", { className: "empty", textContent: "Nothing loaded yet — connect this phone in settings." }));
+          return;
+        }
+
+        const today = todayStr();
+        const habits = snap.habits || [];
+        const logged = habits.filter((d) => isLogged(valueOf(today, keyOf(d)))).length;
+        const met = habits.filter((d) => isMet(d, valueOf(today, keyOf(d)))).length;
+        const sec = taskSections();
+        const mine = overlay.tasks.concat(edits.tasks);
+        const open = sec.overdue.length + sec.due.length + sec.undated.length + mine.length;
+        const streak = streakInfo();
+        const rev = snap.review || {};
+
+        // Ordered by what it costs to ignore. The queue is first because it is the only line here
+        // that represents something that could still be lost.
+        const alerts = [];
+        if (queue.length)
+          alerts.push({
+            tone: "red",
+            text: queue.length + " save(s) not uploaded yet",
+            go: () => doSave(),
+          });
+        if (!dayHasEntry(today))
+          alerts.push({ tone: "red", text: "Today isn't checked in", go: () => goCheckin(today) });
+        if (sec.overdue.length)
+          alerts.push({
+            tone: "red",
+            text: sec.overdue.length + " task" + (sec.overdue.length > 1 ? "s" : "") + " overdue",
+            go: goTasks,
+          });
+        if (sec.due.length)
+          alerts.push({ tone: "amber", text: sec.due.length + " due today", go: () => goCheckin() });
+        // The reviews are written on the PC, so these say so rather than pretending to be a way in.
+        if (rev.week && !rev.weekDone)
+          alerts.push({ tone: "amber", text: "Week " + rev.week + " hasn't been reviewed — on the PC" });
+        if (rev.month && !rev.monthDone)
+          alerts.push({ tone: "amber", text: rev.month + " hasn't been reviewed — on the PC" });
+
+        if (!alerts.length) {
+          box.append(el("div", {
+            className: "clear",
+            textContent: "Nothing is waiting on you. Below is just where things stand.",
+          }));
+        } else {
+          const list = el("div", { className: "alerts" });
+          for (const a of alerts.slice(0, ALERT_CAP)) {
+            const row = el(a.go ? "button" : "div", { className: "alert" + (a.go ? "" : " plain") });
+            if (a.go) row.type = "button";
+            row.append(el("span", {
+              className: "dot",
+              style: "background:" + (a.tone === "red" ? "var(--bad)" : "var(--warn)"),
+            }));
+            row.append(el("span", { textContent: a.text }));
+            if (a.go) {
+              row.append(el("span", { className: "arrow", textContent: "›" }));
+              row.onclick = a.go;
+            }
+            list.append(row);
+          }
+          const rest = alerts.length - ALERT_CAP;
+          if (rest > 0) {
+            list.append(el("div", {
+              className: "alert plain",
+              textContent: "and " + rest + " more",
+            }));
+          }
+          box.append(list);
+        }
+
+        cards.append(leaf({
+          name: "Today",
+          value: logged + "/" + habits.length,
+          unit: "logged",
+          sub: dayHasEntry(today)
+            ? met + " met · " + (streak.capped ? streak.n + "+" : streak.n) +
+              " day" + (streak.n === 1 ? "" : "s") + " in a row"
+            : "nothing recorded yet",
+          tone: dayHasEntry(today) ? "ok" : "red",
+          go: () => goCheckin(today),
+        }));
+
+        cards.append(leaf({
+          name: "To-do",
+          value: String(open),
+          unit: "open",
+          sub: sec.overdue.length
+            ? sec.overdue.length + " overdue · " + sec.due.length + " due today"
+            : sec.due.length + " due today · " + sec.undated.length + " undated",
+          tone: sec.overdue.length ? "red" : sec.due.length ? "amber" : "ok",
+          go: goTasks,
+        }));
+
+        cards.append(leaf({
+          name: "This phone",
+          value: String(queue.length + pendingCount()),
+          unit: queue.length ? "waiting to upload" : "unsaved",
+          sub: snap.publishedAt
+            ? "PC published " + agoText(snap.publishedAt) + " from " + (snap.by || "?")
+            : "no publish time on the snapshot",
+          tone: queue.length ? "amber" : "ok",
+          go: () => setView("checkin"),
+        }));
+
+        $("home-foot").textContent =
+          "Money, projects, stock and the machine stay on the PC. This phone's token reaches one " +
+          "repo, and what travels through it is the check-in and the task list — nothing else.";
+      }
+
+      function leaf(o) {
+        const TONE = { ok: "var(--border)", amber: "var(--warn)", red: "var(--bad)" };
+        const btn = el("button", { className: "leaf", type: "button" });
+        btn.style.borderColor = TONE[o.tone] || TONE.ok;
+        btn.append(el("div", { className: "name", textContent: o.name }));
+        const top = el("div", { className: "top" });
+        const val = el("div", { className: "val", textContent: o.value });
+        if (o.tone !== "ok") val.style.color = TONE[o.tone];
+        top.append(val, el("div", { className: "unit", textContent: o.unit }));
+        btn.append(top, el("div", { className: "sub", textContent: o.sub }));
+        btn.onclick = o.go;
+        return btn;
+      }
+
       function renderDays() {
         const box = $("days");
         box.textContent = "";
-        for (const d of weekDays(todayStr())) {
+        for (const d of editableDays(todayStr())) {
           const [, , dd] = d.split("-");
           const dt = new Date(d.slice(0, 4), Number(d.slice(5, 7)) - 1, Number(dd));
           const chip = el("button", { className: "chip day" + (d === selectedDate ? " on" : ""), type: "button" }, [
             el("span", { textContent: DAY_NAMES[dt.getDay()] }),
             el("small", { textContent: String(Number(dd)) }),
           ]);
+          // A dot on the days already answered. Without it the wider window is just more buttons —
+          // with it, the gap you came back to fill in is the one you can see from across the strip.
+          chip.append(el("span", {
+            className: "seen",
+            style: dayHasEntry(d) ? "background:var(--good)" : "",
+          }));
           chip.onclick = () => { selectedDate = d; render(); };
           box.append(chip);
         }
@@ -924,6 +1221,8 @@
         render();
       };
 
+      $("view-home").onclick = () => setView("home");
+      $("view-checkin").onclick = () => setView("checkin");
       $("btn-settings").onclick = openSetup;
       $("btn-save").onclick = doSave;
       $("task-add").onclick = addTask;
