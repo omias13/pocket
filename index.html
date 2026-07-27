@@ -382,13 +382,29 @@
       }
       const rid = () => Math.random().toString(36).slice(2, 10).replace(/[^a-z0-9]/g, "x");
 
+      async function explain404() {
+        let repoVisible = false;
+        try { repoVisible = (await gh("/repos/" + cfg.repo)).ok; } catch { /* offline: fall through */ }
+        if (repoVisible) {
+          return "The repo is there but has no snapshot.json yet — start Claude once on the PC and it will publish one.";
+        }
+        return "This token cannot see " + cfg.repo + ". On GitHub the token needs Repository access = " +
+          "Only select repositories, with that repo picked — a token with nothing selected still works " +
+          "and still reads public repos, which is why it looks valid. Check the token's Repository access.";
+      }
+
       async function pullSnapshot() {
         const res = await gh("/repos/" + cfg.repo + "/contents/snapshot.json", {
           accept: "application/vnd.github.raw",
         });
         if (res.status === 401) throw new Error("GitHub does not recognise this token (401). Most likely it is not the real value — that is shown once, right after Generate. Delete it on GitHub and make a new one.");
         if (res.status === 403) throw new Error("Token recognised but not allowed here (403) — it needs Repository access = " + cfg.repo + " and Contents: Read and write.");
-        if (res.status === 404) throw new Error("no snapshot.json in " + cfg.repo + " yet — run a Claude session on the PC once");
+        // A private repo the token cannot see answers 404, exactly like a missing file — GitHub
+        // will not admit the repo exists. Guessing "the file is missing" sends you to the PC to
+        // re-publish a snapshot that was there all along. Ask about the repo itself to tell the
+        // two apart: still 404 means the token's Repository access never included this repo,
+        // which is the single most common way this setup goes wrong.
+        if (res.status === 404) throw new Error(await explain404());
         if (!res.ok) throw new Error("GitHub said " + res.status);
         const doc = JSON.parse(await res.text());
         snap = doc;
