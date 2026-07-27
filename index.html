@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Omias Pocket</title>
+    <meta name="description" content="Phone capture for Omias — check in and file tasks from anywhere." />
+    <link rel="manifest" href="manifest.json" />
+    <meta name="theme-color" content="#141a24" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Pocket" />
+    <link rel="apple-touch-icon" href="icon.png" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <!--
+      Omias Pocket — the check-in, on a phone.
+
+      WHAT THIS IS
+      Omias itself is a loopback-only dev server on a PC. Dan's days happen at substations and in
+      meetings with the laptop switched off at home, so the check-in was only ever reachable at
+      exactly the times he could not use it. A tunnel does not fix that: a tunnel still needs the
+      machine at the far end to be awake.
+
+      So this page does not talk to Omias at all. It appends one small JSON document per save to a
+      private GitHub repo, which is awake whether or not any machine is, and the PC drains that
+      mailbox on the next Claude session (scripts/pocket-sync.ts). Same move as the VM heartbeat.
+
+      WHY IT IS ONE FILE WITH NO BUILD
+      It has to load on a bad signal at a substation and it must never be blocked on a toolchain,
+      an npm install, or a machine of Dan's being up. One file, no dependencies, no framework.
+
+      WHAT IT HOLDS
+      A fine-grained token, in this phone's localStorage, scoped to that one repo and nothing else.
+      Worst case if the phone is lost: two weeks of habit ticks and a task list. The journal, the
+      finances and the memory notes live in a different repo the token cannot reach.
+    -->
+    <style>
+      :root {
+        --radius: 0.625rem;
+        --background: oklch(0.99 0.002 240);
+        --foreground: oklch(0.18 0.02 260);
+        --card: oklch(1 0 0);
+        --muted: oklch(0.968 0.007 247.896);
+        --muted-foreground: oklch(0.554 0.046 257.417);
+        --primary: oklch(0.208 0.042 265.755);
+        --primary-foreground: oklch(0.984 0.003 247.858);
+        --border: oklch(0.929 0.013 255.508);
+        --good: oklch(0.62 0.14 155);
+        --warn: oklch(0.72 0.15 70);
+        --bad: oklch(0.577 0.245 27.325);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --background: oklch(0.16 0.012 260);
+          --foreground: oklch(0.96 0.003 247);
+          --card: oklch(0.195 0.014 260);
+          --muted: oklch(0.235 0.015 260);
+          --muted-foreground: oklch(0.68 0.02 257);
+          --primary: oklch(0.96 0.003 247);
+          --primary-foreground: oklch(0.18 0.02 260);
+          --border: oklch(0.3 0.015 260);
+          --good: oklch(0.7 0.15 155);
+        }
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: var(--background);
+        color: var(--foreground);
+        font: 16px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+        overscroll-behavior-y: contain;
+      }
+      /* Room for the save bar, which is fixed and would otherwise cover the last card. */
+      main { padding: 0 14px 132px; max-width: 640px; margin: 0 auto; }
+
+      header {
+        position: sticky; top: 0; z-index: 5;
+        background: color-mix(in oklab, var(--background) 88%, transparent);
+        backdrop-filter: blur(10px);
+        padding: 12px 14px 8px; max-width: 640px; margin: 0 auto;
+        display: flex; align-items: baseline; gap: 8px;
+      }
+      header h1 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+      header .sub { color: var(--muted-foreground); font-size: 13px; margin-left: auto; }
+      .iconbtn {
+        background: none; border: 0; color: var(--muted-foreground);
+        font-size: 18px; padding: 4px 6px; cursor: pointer; line-height: 1;
+      }
+
+      .card {
+        background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+        padding: 12px 14px; margin: 10px 0;
+      }
+      .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+        color: var(--muted-foreground); margin: 0 0 10px; font-weight: 600; }
+
+      .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+      .chip {
+        border: 1px solid var(--border); background: var(--card); color: var(--foreground);
+        border-radius: 999px; padding: 7px 13px; font-size: 14px; cursor: pointer;
+        min-height: 38px; display: inline-flex; align-items: center; gap: 6px;
+      }
+      .chip[aria-pressed="true"], .chip.on {
+        background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
+      }
+      .chip.day { flex-direction: column; gap: 0; padding: 5px 11px; line-height: 1.15; }
+      .chip.day small { font-size: 10px; opacity: 0.7; }
+
+      .habit { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); }
+      .habit:first-of-type { border-top: 0; }
+      .habit .label { flex: 1; min-width: 0; }
+      .habit .label b { font-weight: 550; font-size: 15px; display: block; }
+      .habit .label small { color: var(--muted-foreground); font-size: 12px; }
+      .habit .done { color: var(--good); }
+
+      .toggle {
+        width: 52px; height: 31px; border-radius: 999px; border: 1px solid var(--border);
+        background: var(--muted); position: relative; cursor: pointer; flex: none; padding: 0;
+        transition: background 0.12s;
+      }
+      .toggle::after {
+        content: ""; position: absolute; top: 2px; left: 2px; width: 25px; height: 25px;
+        border-radius: 50%; background: var(--card); box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
+        transition: transform 0.12s;
+      }
+      .toggle[aria-pressed="true"] { background: var(--good); border-color: transparent; }
+      .toggle[aria-pressed="true"]::after { transform: translateX(21px); }
+      .toggle.off-known { background: var(--bad); border-color: transparent; }
+
+      .stepper { display: flex; align-items: center; gap: 2px; flex: none; }
+      .stepper button {
+        width: 40px; height: 38px; font-size: 20px; border: 1px solid var(--border);
+        background: var(--card); color: var(--foreground); cursor: pointer;
+      }
+      .stepper button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+      .stepper button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+      .stepper .val { min-width: 62px; text-align: center; font-variant-numeric: tabular-nums;
+        border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+        height: 38px; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+      .stepper .val.unset { color: var(--muted-foreground); }
+
+      .mood { display: flex; gap: 4px; }
+      .mood button {
+        width: 38px; height: 38px; border-radius: var(--radius); border: 1px solid var(--border);
+        background: var(--card); font-size: 18px; cursor: pointer; padding: 0;
+      }
+      .mood button.on { background: var(--primary); border-color: var(--primary); }
+
+      .sub-row { padding: 0 0 10px 0; }
+      .meal { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 14px; }
+      .meal button { background: none; border: 0; color: var(--muted-foreground); font-size: 17px; cursor: pointer; }
+
+      input[type="text"], input[type="password"], input[type="number"] {
+        width: 100%; padding: 11px 12px; font-size: 16px; color: var(--foreground);
+        background: var(--background); border: 1px solid var(--border); border-radius: var(--radius);
+        font-family: inherit;
+      }
+      .row { display: flex; gap: 8px; align-items: center; }
+
+      .task { display: flex; gap: 11px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--border); }
+      .task:first-of-type { border-top: 0; }
+      .task .box {
+        width: 23px; height: 23px; flex: none; border-radius: 6px; border: 1.5px solid var(--border);
+        background: var(--card); cursor: pointer; margin-top: 1px; padding: 0; color: var(--primary-foreground);
+        font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
+      }
+      .task .box.on { background: var(--good); border-color: var(--good); color: #fff; }
+      .task .txt { flex: 1; min-width: 0; font-size: 15px; overflow-wrap: anywhere; }
+      .task.is-done .txt { text-decoration: line-through; color: var(--muted-foreground); }
+      .task .meta { font-size: 12px; color: var(--muted-foreground); }
+      .task .meta .late { color: var(--bad); }
+      .task .meta .new { color: var(--warn); }
+
+      .savebar {
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
+        padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+        background: color-mix(in oklab, var(--background) 92%, transparent);
+        backdrop-filter: blur(10px); border-top: 1px solid var(--border);
+      }
+      .savebar .inner { max-width: 640px; margin: 0 auto; display: flex; gap: 10px; align-items: center; }
+      .savebar .status { font-size: 12px; color: var(--muted-foreground); flex: 1; min-width: 0; }
+      button.primary {
+        background: var(--primary); color: var(--primary-foreground); border: 0;
+        border-radius: var(--radius); padding: 13px 22px; font-size: 15px; font-weight: 600;
+        cursor: pointer; font-family: inherit;
+      }
+      button.primary:disabled { opacity: 0.4; }
+      button.ghost {
+        background: var(--card); color: var(--foreground); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 10px 14px; font-size: 14px; cursor: pointer; font-family: inherit;
+      }
+
+      dialog {
+        border: 1px solid var(--border); border-radius: 14px; background: var(--card);
+        color: var(--foreground); padding: 18px; width: min(94vw, 460px); max-height: 86vh;
+      }
+      dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+      dialog h2 { margin: 0 0 4px; font-size: 17px; }
+      dialog p, dialog li { font-size: 13px; color: var(--muted-foreground); }
+      dialog label { display: block; font-size: 13px; margin: 12px 0 5px; font-weight: 550; color: var(--foreground); }
+      .hint { font-size: 12px; color: var(--muted-foreground); margin: 6px 0 0; }
+      .banner { border-radius: var(--radius); padding: 10px 12px; font-size: 13px; margin: 10px 0; }
+      .banner.err { background: color-mix(in oklab, var(--bad) 16%, var(--card)); border: 1px solid var(--bad); }
+      .banner.warn { background: color-mix(in oklab, var(--warn) 16%, var(--card)); border: 1px solid var(--warn); }
+      .empty { color: var(--muted-foreground); font-size: 14px; padding: 4px 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Pocket</h1>
+      <span class="sub" id="hdr-sub"></span>
+      <button class="iconbtn" id="btn-refresh" title="Reload from GitHub">&#8635;</button>
+      <button class="iconbtn" id="btn-settings" title="Settings">&#9881;</button>
+    </header>
+
+    <main>
+      <div id="banners"></div>
+
+      <div class="card" id="day-card">
+        <h2>Day</h2>
+        <div class="chips" id="days"></div>
+      </div>
+
+      <div class="card">
+        <h2>Routine</h2>
+        <div class="chips" id="routines"></div>
+      </div>
+
+      <div class="card" id="habits-card">
+        <h2 id="habits-title">Check-in</h2>
+        <div id="habits"></div>
+      </div>
+
+      <div class="card">
+        <h2>Tasks</h2>
+        <div class="row">
+          <input type="text" id="task-line" placeholder="ส่งรายงาน #egat !2 พรุ่งนี้" enterkeyhint="done" />
+          <button class="primary" id="task-add" style="padding: 13px 16px">+</button>
+        </div>
+        <p class="hint">
+          Same line syntax as the desktop box: <b>#tag</b>, <b>!1&ndash;!4</b>, a date or พรุ่งนี้.
+          Prefix with <b>@</b> to file it as an event instead.
+        </p>
+        <div id="tasks"></div>
+      </div>
+    </main>
+
+    <div class="savebar">
+      <div class="inner">
+        <span class="status" id="status">&nbsp;</span>
+        <button class="primary" id="btn-save" disabled>Save</button>
+      </div>
+    </div>
+
+    <dialog id="setup">
+      <h2>Connect this phone</h2>
+      <p>
+        Pocket files what you enter into a private GitHub repo. Your PC picks it up on the next
+        Claude session. Nothing else on the internet can read it.
+      </p>
+      <label for="cfg-repo">Data repo</label>
+      <input type="text" id="cfg-repo" placeholder="omias13/pocket-data" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <label for="cfg-token">Fine-grained token</label>
+      <input type="password" id="cfg-token" placeholder="github_pat_..." autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <p class="hint">
+        github.com &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens &rarr;
+        Fine-grained. Repository access: <b>only</b> that one repo. Permissions:
+        <b>Contents: Read and write</b>. Nothing else.
+      </p>
+      <div id="setup-msg"></div>
+      <div class="row" style="margin-top: 14px; justify-content: flex-end">
+        <button class="ghost" id="cfg-forget">Forget token</button>
+        <button class="primary" id="cfg-save">Save</button>
+      </div>
+      <p class="hint" id="setup-foot"></p>
+    </dialog>
+
+    <script>
+      "use strict";
+
+      // ── storage keys ────────────────────────────────────────────────────────
+      const K_CFG = "pocket.cfg";
+      const K_SNAP = "pocket.snapshot";
+      const K_QUEUE = "pocket.queue";
+      const K_OVERLAY = "pocket.overlay";
+
+      const load = (k, fallback) => {
+        try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; }
+        catch { return fallback; }
+      };
+      const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+      let cfg = load(K_CFG, { repo: "omias13/pocket-data", token: "" });
+      let snap = load(K_SNAP, null);
+      /**
+       * What this phone has already filed but the PC has not yet drained.
+       *
+       * Every value carries the moment it was entered, and it only wins over the snapshot if it is
+       * newer than the snapshot was published. That way a value corrected on the PC after the fact
+       * shows up here as the correction, instead of this phone insisting on its own stale answer
+       * for ever.
+       */
+      let overlay = load(K_OVERLAY, { days: {}, done: {}, tasks: [] });
+      /** Documents that could not be uploaded yet — a lift, a substation, a dead 4G cell. */
+      let queue = load(K_QUEUE, []);
+      /** Unsaved edits, this session only. Same shape as the overlay. */
+      let edits = { days: {}, done: {}, tasks: [] };
+
+      let selectedDate = todayStr();
+      let selectedRoutine = routineForHour(new Date().getHours());
+      let busy = false;
+
+      // ── dates ───────────────────────────────────────────────────────────────
+      const pad = (n) => String(n).padStart(2, "0");
+      function ymd(d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
+      function todayStr() { return ymd(new Date()); }
+      function addDays(iso, n) {
+        const [y, m, d] = iso.split("-").map(Number);
+        return ymd(new Date(y, m - 1, d + n));
+      }
+      /** Monday-first, like everywhere else in Omias. */
+      function weekDays(today) {
+        const [y, m, d] = today.split("-").map(Number);
+        const dow = (new Date(y, m - 1, d).getDay() + 6) % 7;
+        const out = [];
+        for (let i = 0; i <= dow; i++) out.push(addDays(today, -dow + i));
+        return out;
+      }
+      /** Evening runs past midnight: a check-in filed at 00:30 belongs to the day that just ended. */
+      function routineForHour(h) {
+        if (h >= 4 && h < 11) return "morning";
+        if (h >= 18 || h < 4) return "evening";
+        return "anytime";
+      }
+      const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      function prettyDate(iso) {
+        const [y, m, d] = iso.split("-").map(Number);
+        const dt = new Date(y, m - 1, d);
+        return DAY_NAMES[dt.getDay()] + " " + d + " " + MONTHS[m - 1];
+      }
+      function agoText(iso) {
+        const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+        if (!isFinite(mins)) return "";
+        if (mins < 2) return "just now";
+        if (mins < 60) return mins + " min ago";
+        const h = Math.round(mins / 60);
+        if (h < 36) return h + "h ago";
+        return Math.round(h / 24) + "d ago";
+      }
+
+      // ── github ──────────────────────────────────────────────────────────────
+      async function gh(path, opts) {
+        const o = opts || {};
+        const res = await fetch("https://api.github.com" + path, {
+          method: o.method || "GET",
+          headers: {
+            Authorization: "Bearer " + cfg.token,
+            Accept: o.accept || "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+          body: o.body,
+          cache: "no-store",
+        });
+        return res;
+      }
+      /** btoa() is bytes-only; the check-in is full of Thai. */
+      function b64(str) {
+        const bytes = new TextEncoder().encode(str);
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(bin);
+      }
+      const rid = () => Math.random().toString(36).slice(2, 10).replace(/[^a-z0-9]/g, "x");
+
+      async function pullSnapshot() {
+        const res = await gh("/repos/" + cfg.repo + "/contents/snapshot.json", {
+          accept: "application/vnd.github.raw",
+        });
+        if (res.status === 401 || res.status === 403) throw new Error("token rejected (401/403) — check its repo access and Contents permission");
+        if (res.status === 404) throw new Error("no snapshot.json in " + cfg.repo + " yet — run a Claude session on the PC once");
+        if (!res.ok) throw new Error("GitHub said " + res.status);
+        const doc = JSON.parse(await res.text());
+        snap = doc;
+        save(K_SNAP, doc);
+        pruneOverlay();
+        return doc;
+      }
+
+      async function upload(doc) {
+        const name = doc.filedAt.replace(/[:.]/g, "-") + "-" + doc.id + ".json";
+        const res = await gh("/repos/" + cfg.repo + "/contents/inbox/" + name, {
+          method: "PUT",
+          body: JSON.stringify({
+            message: "pocket: " + doc.actions.length + " action(s) from " + (doc.device || "phone"),
+            content: b64(JSON.stringify(doc, null, 2) + "\n"),
+          }),
+        });
+        if (!res.ok) throw new Error("upload failed: " + res.status + " " + (await res.text()).slice(0, 160));
+      }
+
+      /** Anything the PC has demonstrably seen is dead weight — and a stale override if it stays. */
+      function pruneOverlay() {
+        const cut = snap && snap.publishedAt ? new Date(snap.publishedAt).getTime() : 0;
+        const keep = (at) => new Date(at).getTime() > cut;
+        for (const date of Object.keys(overlay.days)) {
+          for (const f of Object.keys(overlay.days[date])) {
+            if (!keep(overlay.days[date][f].at)) delete overlay.days[date][f];
+          }
+          if (!Object.keys(overlay.days[date]).length) delete overlay.days[date];
+        }
+        for (const id of Object.keys(overlay.done)) if (!keep(overlay.done[id].at)) delete overlay.done[id];
+        overlay.tasks = overlay.tasks.filter((t) => keep(t.at));
+        save(K_OVERLAY, overlay);
+      }
+
+      // ── reading a value: snapshot, then what this phone knows on top ────────
+      function habitField(def) { return def.field || null; }
+      function rawFromSnapshot(date, def) {
+        const day = (snap && snap.days && snap.days[date]) || {};
+        return def.field ? day[def.field] : (day.habits || {})[def.id];
+      }
+      function layerValue(layer, date, key) {
+        const rec = layer.days[date] && layer.days[date][key];
+        return rec ? rec : undefined;
+      }
+      /** The value to render: unsaved edit first, then this phone's filed value, then the PC's. */
+      function valueOf(date, key) {
+        const e = layerValue(edits, date, key);
+        if (e) return e.v;
+        const o = layerValue(overlay, date, key);
+        if (o) return o.v;
+        const day = (snap && snap.days && snap.days[date]) || {};
+        if (key.startsWith("habits.")) return (day.habits || {})[key.slice(7)];
+        return day[key];
+      }
+      function setValue(date, key, v) {
+        edits.days[date] = edits.days[date] || {};
+        edits.days[date][key] = { v: v, at: new Date().toISOString() };
+        render();
+      }
+      function keyOf(def) { return def.field ? def.field : "habits." + def.id; }
+
+      function taskDone(t) {
+        const e = edits.done[t.id];
+        if (e) return e.v;
+        const o = overlay.done[t.id];
+        if (o) return o.v;
+        return !!t.done;
+      }
+
+      function pendingCount() {
+        let n = 0;
+        for (const d of Object.keys(edits.days)) n += Object.keys(edits.days[d]).length;
+        n += Object.keys(edits.done).length;
+        n += edits.tasks.length;
+        return n;
+      }
+
+      // ── rendering ───────────────────────────────────────────────────────────
+      const $ = (id) => document.getElementById(id);
+      const el = (tag, props, kids) => {
+        const n = Object.assign(document.createElement(tag), props || {});
+        for (const k of kids || []) n.append(k);
+        return n;
+      };
+
+      function render() {
+        renderBanners();
+        renderDays();
+        renderRoutines();
+        renderHabits();
+        renderTasks();
+        const n = pendingCount();
+        $("btn-save").disabled = n === 0 || busy;
+        $("btn-save").textContent = busy ? "Saving…" : n ? "Save " + n : "Save";
+        $("hdr-sub").textContent = snap ? prettyDate(selectedDate) : "not connected";
+      }
+
+      function renderBanners() {
+        const box = $("banners");
+        box.textContent = "";
+        if (!cfg.token) {
+          box.append(el("div", { className: "banner warn", textContent: "No token yet — open settings to connect this phone." }));
+          return;
+        }
+        if (queue.length) {
+          box.append(el("div", {
+            className: "banner warn",
+            textContent: queue.length + " save(s) still on this phone — they will go up as soon as there is signal.",
+          }));
+        }
+        if (window.__lastError) {
+          box.append(el("div", { className: "banner err", textContent: window.__lastError }));
+        }
+        if (snap && snap.publishedAt) {
+          const stale = Date.now() - new Date(snap.publishedAt).getTime() > 3 * 864e5;
+          if (stale) {
+            box.append(el("div", {
+              className: "banner warn",
+              textContent: "The PC last published " + agoText(snap.publishedAt) + ", so ticks made there since are not shown here.",
+            }));
+          }
+        }
+      }
+
+      function renderDays() {
+        const box = $("days");
+        box.textContent = "";
+        for (const d of weekDays(todayStr())) {
+          const [, , dd] = d.split("-");
+          const dt = new Date(d.slice(0, 4), Number(d.slice(5, 7)) - 1, Number(dd));
+          const chip = el("button", { className: "chip day" + (d === selectedDate ? " on" : ""), type: "button" }, [
+            el("span", { textContent: DAY_NAMES[dt.getDay()] }),
+            el("small", { textContent: String(Number(dd)) }),
+          ]);
+          chip.onclick = () => { selectedDate = d; render(); };
+          box.append(chip);
+        }
+      }
+
+      const ROUTINES = ["morning", "anytime", "evening", "all"];
+      function renderRoutines() {
+        const box = $("routines");
+        box.textContent = "";
+        for (const r of ROUTINES) {
+          const chip = el("button", {
+            className: "chip" + (r === selectedRoutine ? " on" : ""),
+            type: "button",
+            textContent: r[0].toUpperCase() + r.slice(1),
+          });
+          chip.onclick = () => { selectedRoutine = r; render(); };
+          box.append(chip);
+        }
+      }
+
+      const MOOD_FACES = ["😖", "😕", "😐", "🙂", "😄"];
+
+      function renderHabits() {
+        const box = $("habits");
+        box.textContent = "";
+        const habits = (snap && snap.habits) || [];
+        const shown = habits.filter((h) => selectedRoutine === "all" || h.routine === selectedRoutine);
+        if (!habits.length) {
+          box.append(el("p", { className: "empty", textContent: "No check-in loaded yet." }));
+          return;
+        }
+        if (!shown.length) {
+          box.append(el("p", { className: "empty", textContent: "Nothing in this routine." }));
+          return;
+        }
+        for (const def of shown) box.append(habitRow(def));
+      }
+
+      function habitRow(def) {
+        const key = keyOf(def);
+        const v = valueOf(selectedDate, key);
+        const row = el("div", { className: "habit" });
+        const met = isMet(def, v);
+        const label = el("div", { className: "label" }, [
+          el("b", { textContent: def.label }),
+        ]);
+        const hintBits = [];
+        if (def.target) hintBits.push("target " + def.target + (def.unit ? " " + def.unit : ""));
+        if (met) hintBits.push("done");
+        if (hintBits.length) label.append(el("small", { className: met ? "done" : "", textContent: hintBits.join(" · ") }));
+        row.append(label);
+
+        if (def.kind === "toggle") {
+          const b = el("button", { className: "toggle" + (v === false ? " off-known" : ""), type: "button" });
+          b.setAttribute("aria-pressed", v === true ? "true" : "false");
+          // Three states matter: yes, no, and not answered. Tapping cycles yes → no → unanswered,
+          // so a day Dan genuinely missed reads differently from one he never filled in.
+          b.onclick = () => setValue(selectedDate, key, v === true ? false : v === false ? undefined : true);
+          row.append(b);
+        } else if (def.kind === "mood") {
+          const wrap = el("div", { className: "mood" });
+          for (let i = 1; i <= 5; i++) {
+            const b = el("button", { type: "button", textContent: MOOD_FACES[i - 1], className: v === i ? "on" : "" });
+            b.onclick = () => setValue(selectedDate, key, v === i ? undefined : i);
+            wrap.append(b);
+          }
+          row.append(wrap);
+        } else if (def.kind === "number" || def.kind === "exercise") {
+          row.append(stepper(def, key, v));
+        } else if (def.kind === "meals") {
+          row.append(el("button", { className: "chip", type: "button", textContent: "+ add" , onclick: () => addMeal(key) }));
+        }
+
+        const block = el("div", {});
+        block.append(row);
+        if (def.kind === "exercise") block.append(partsRow());
+        if (def.kind === "meals") block.append(mealsRow(key, v));
+        return block;
+      }
+
+      function stepper(def, key, v) {
+        const step = def.step || 1;
+        const wrap = el("div", { className: "stepper" });
+        const dec = el("button", { type: "button", textContent: "−" });
+        const val = el("div", { className: "val" + (typeof v === "number" ? "" : " unset"),
+          textContent: typeof v === "number" ? v + (def.unit ? " " + def.unit : "") : "—" });
+        const inc = el("button", { type: "button", textContent: "+" });
+        dec.onclick = () => {
+          const cur = typeof v === "number" ? v : 0;
+          const next = Math.max(0, Math.round((cur - step) * 100) / 100);
+          setValue(selectedDate, key, cur === 0 ? undefined : next);
+        };
+        inc.onclick = () => {
+          const cur = typeof v === "number" ? v : def.target ? def.target - step : 0;
+          setValue(selectedDate, key, Math.round((cur + step) * 100) / 100);
+        };
+        wrap.append(dec, val, inc);
+        return wrap;
+      }
+
+      function partsRow() {
+        const parts = (snap && snap.parts) || [];
+        const cur = valueOf(selectedDate, "exerciseParts") || [];
+        const wrap = el("div", { className: "chips sub-row" });
+        for (const p of parts) {
+          const on = cur.indexOf(p) >= 0;
+          const chip = el("button", { className: "chip" + (on ? " on" : ""), type: "button", textContent: p });
+          chip.onclick = () => {
+            const next = on ? cur.filter((x) => x !== p) : cur.concat([p]);
+            setValue(selectedDate, "exerciseParts", next);
+          };
+          wrap.append(chip);
+        }
+        return wrap;
+      }
+
+      function mealsRow(key, v) {
+        const list = Array.isArray(v) ? v : [];
+        const wrap = el("div", { className: "sub-row" });
+        list.forEach((m, i) => {
+          const row = el("div", { className: "meal" }, [el("span", { textContent: "• " + (m.text || "") })]);
+          const del = el("button", { type: "button", textContent: "×", title: "remove" });
+          del.onclick = () => setValue(selectedDate, key, list.filter((_, j) => j !== i));
+          row.append(del);
+          wrap.append(row);
+        });
+        return wrap;
+      }
+
+      function addMeal(key) {
+        const text = prompt("What did you eat?");
+        if (!text) return;
+        const cur = valueOf(selectedDate, key);
+        const list = Array.isArray(cur) ? cur.slice() : [];
+        list.push({ text: String(text).slice(0, 200) });
+        setValue(selectedDate, key, list);
+      }
+
+      function isMet(def, v) {
+        switch (def.kind) {
+          case "toggle": return v === true;
+          case "number":
+          case "exercise": return typeof v === "number" && v >= (def.target || 1);
+          case "mood": return typeof v === "number";
+          case "meals": return Array.isArray(v) && v.length > 0;
+          default: return false;
+        }
+      }
+
+      function renderTasks() {
+        const box = $("tasks");
+        box.textContent = "";
+        const fromPc = ((snap && snap.todos) || []).slice();
+        const mine = overlay.tasks.concat(edits.tasks);
+        if (!fromPc.length && !mine.length) {
+          box.append(el("p", { className: "empty", textContent: "Nothing open." }));
+          return;
+        }
+        // Newly written lines first: they are the ones that still look unreal until the PC files them.
+        for (const t of mine) {
+          const row = el("div", { className: "task" }, [
+            el("div", { className: "box", textContent: "" }),
+            el("div", { className: "txt" }, [
+              document.createTextNode(t.line),
+              el("div", { className: "meta" }, [el("span", { className: "new", textContent: (t.mode === "event" ? "event" : "task") + " · filed from this phone" })]),
+            ]),
+          ]);
+          box.append(row);
+        }
+        for (const t of fromPc) {
+          const done = taskDone(t);
+          const row = el("div", { className: "task" + (done ? " is-done" : "") });
+          const box2 = el("button", { className: "box" + (done ? " on" : ""), type: "button", textContent: done ? "✓" : "" });
+          box2.onclick = () => {
+            edits.done[t.id] = { v: !done, at: new Date().toISOString() };
+            if (!done === !!t.done) delete edits.done[t.id]; // tapped back to where it started
+            render();
+          };
+          const meta = [];
+          if (t.due) {
+            const late = t.due < todayStr() && !done;
+            meta.push(el("span", { className: late ? "late" : "", textContent: (late ? "overdue " : "") + t.due }));
+          }
+          if (t.cat) meta.push(el("span", { textContent: "#" + t.cat }));
+          if (t.priority && t.priority <= 2) meta.push(el("span", { textContent: "!" + t.priority }));
+          const txt = el("div", { className: "txt" }, [document.createTextNode(t.text || "")]);
+          if (meta.length) {
+            const m = el("div", { className: "meta" });
+            meta.forEach((x, i) => { if (i) m.append(document.createTextNode(" · ")); m.append(x); });
+            txt.append(m);
+          }
+          row.append(box2, txt);
+          box.append(row);
+        }
+      }
+
+      // ── saving ──────────────────────────────────────────────────────────────
+      function buildDoc() {
+        const filedAt = new Date().toISOString();
+        const actions = [];
+        for (const date of Object.keys(edits.days)) {
+          const patch = {};
+          const habits = {};
+          for (const [key, rec] of Object.entries(edits.days[date])) {
+            if (key.startsWith("habits.")) habits[key.slice(7)] = rec.v;
+            else patch[key] = rec.v;
+          }
+          if (Object.keys(habits).length) patch.habits = habits;
+          // undefined does not survive JSON: an un-answered habit is sent as null and the PC
+          // drops the field. Without this, clearing a value would silently do nothing.
+          for (const k of Object.keys(patch)) if (patch[k] === undefined) patch[k] = null;
+          if (Object.keys(patch).length) actions.push({ kind: "daily", date: date, patch: patch });
+        }
+        for (const t of edits.tasks) actions.push({ kind: "task", id: t.id, line: t.line, mode: t.mode });
+        for (const [id, rec] of Object.entries(edits.done)) {
+          actions.push({ kind: "todoDone", id: id, done: rec.v, at: rec.at });
+        }
+        return { v: 1, id: rid(), filedAt: filedAt, device: "phone", actions: actions };
+      }
+
+      function commitToOverlay() {
+        const stamp = new Date().toISOString();
+        for (const date of Object.keys(edits.days)) {
+          overlay.days[date] = overlay.days[date] || {};
+          for (const [k, rec] of Object.entries(edits.days[date])) overlay.days[date][k] = { v: rec.v, at: stamp };
+        }
+        for (const [id, rec] of Object.entries(edits.done)) overlay.done[id] = { v: rec.v, at: stamp };
+        for (const t of edits.tasks) overlay.tasks.push({ ...t, at: stamp });
+        save(K_OVERLAY, overlay);
+        edits = { days: {}, done: {}, tasks: [] };
+      }
+
+      async function flushQueue() {
+        while (queue.length) {
+          await upload(queue[0]);
+          queue.shift();
+          save(K_QUEUE, queue);
+        }
+      }
+
+      async function doSave() {
+        if (busy) return;
+        const doc = buildDoc();
+        if (!doc.actions.length && !queue.length) return;
+        busy = true;
+        window.__lastError = "";
+        setStatus("Saving…");
+        render();
+        // Into the overlay and the queue FIRST: from here the entry survives the tab being closed,
+        // the battery dying, or the upload failing. This is the whole point of the feature.
+        if (doc.actions.length) {
+          commitToOverlay();
+          queue.push(doc);
+          save(K_QUEUE, queue);
+        }
+        try {
+          await flushQueue();
+          setStatus("Saved · " + new Date().toLocaleTimeString());
+        } catch (err) {
+          window.__lastError = "Not uploaded yet: " + err.message;
+          setStatus("Kept on this phone — will retry");
+        } finally {
+          busy = false;
+          render();
+        }
+      }
+
+      function setStatus(text) { $("status").textContent = text; }
+
+      // ── quick add ───────────────────────────────────────────────────────────
+      function addTask() {
+        const input = $("task-line");
+        let line = input.value.trim();
+        if (!line) return;
+        let mode = "task";
+        if (line.startsWith("@")) { mode = "event"; line = line.slice(1).trim(); }
+        if (!line) return;
+        edits.tasks.push({ id: rid(), line: line, mode: mode, at: new Date().toISOString() });
+        input.value = "";
+        render();
+      }
+
+      // ── settings ────────────────────────────────────────────────────────────
+      function openSetup() {
+        $("cfg-repo").value = cfg.repo || "omias13/pocket-data";
+        $("cfg-token").value = cfg.token || "";
+        $("setup-msg").textContent = "";
+        $("setup-foot").textContent = snap && snap.publishedAt
+          ? "PC last published " + agoText(snap.publishedAt) + " from " + (snap.by || "?") + "."
+          : "";
+        $("setup").showModal();
+      }
+
+      $("cfg-save").onclick = async () => {
+        cfg = { repo: $("cfg-repo").value.trim().replace(/^https?:\/\/github\.com\//, ""), token: $("cfg-token").value.trim() };
+        save(K_CFG, cfg);
+        const msg = $("setup-msg");
+        msg.textContent = "";
+        msg.append(el("div", { className: "banner warn", textContent: "Checking…" }));
+        try {
+          await pullSnapshot();
+          $("setup").close();
+          setStatus("Connected");
+        } catch (err) {
+          msg.textContent = "";
+          msg.append(el("div", { className: "banner err", textContent: err.message }));
+        }
+        render();
+      };
+
+      $("cfg-forget").onclick = () => {
+        if (!confirm("Remove the token from this phone? Anything not yet uploaded stays queued.")) return;
+        cfg.token = "";
+        save(K_CFG, cfg);
+        $("setup").close();
+        render();
+      };
+
+      $("btn-settings").onclick = openSetup;
+      $("btn-save").onclick = doSave;
+      $("task-add").onclick = addTask;
+      $("task-line").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTask(); } });
+      $("btn-refresh").onclick = async () => {
+        window.__lastError = "";
+        setStatus("Loading…");
+        try { await flushQueue(); await pullSnapshot(); setStatus("Up to date"); }
+        catch (err) { window.__lastError = err.message; setStatus(""); }
+        render();
+      };
+
+      // ── boot ────────────────────────────────────────────────────────────────
+      (async function boot() {
+        render();
+        if (!cfg.token) { openSetup(); return; }
+        try {
+          await flushQueue();
+          await pullSnapshot();
+          setStatus(snap.publishedAt ? "PC published " + agoText(snap.publishedAt) : "");
+        } catch (err) {
+          // An old snapshot in localStorage is worth far more than an empty screen on a train.
+          window.__lastError = err.message + (snap ? " — showing the copy on this phone" : "");
+        }
+        render();
+      })();
+
+      // Coming back to the tab after a while: pick up anything queued, and re-check the day.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible") return;
+        const t = todayStr();
+        if (selectedDate < t) { selectedDate = t; selectedRoutine = routineForHour(new Date().getHours()); }
+        if (cfg.token && queue.length) doSave();
+        else render();
+      });
+    </script>
+  </body>
+</html>
