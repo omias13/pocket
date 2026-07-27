@@ -386,7 +386,8 @@
         const res = await gh("/repos/" + cfg.repo + "/contents/snapshot.json", {
           accept: "application/vnd.github.raw",
         });
-        if (res.status === 401 || res.status === 403) throw new Error("token rejected (401/403) — check its repo access and Contents permission");
+        if (res.status === 401) throw new Error("GitHub does not recognise this token (401). Most likely it is not the real value — that is shown once, right after Generate. Delete it on GitHub and make a new one.");
+        if (res.status === 403) throw new Error("Token recognised but not allowed here (403) — it needs Repository access = " + cfg.repo + " and Contents: Read and write.");
         if (res.status === 404) throw new Error("no snapshot.json in " + cfg.repo + " yet — run a Claude session on the PC once");
         if (!res.ok) throw new Error("GitHub said " + res.status);
         const doc = JSON.parse(await res.text());
@@ -848,10 +849,33 @@
         $("setup").showModal();
       }
 
+      // The token value is shown once, in the flash box straight after Generate — never again.
+      // Miss it and what ends up in the clipboard is something else entirely (the token's name,
+      // a stale copy), and GitHub answers that with a flat 401 that reads like the permissions
+      // are wrong. Saying so here saves an evening of re-checking the wrong thing.
+      function tokenShapeComplaint(t) {
+        if (!t) return "Paste the token first.";
+        if (/\s/.test(t)) return "That has a space or line break in it — copy just the token, nothing around it.";
+        if (!/^(github_pat_|ghp_|gho_|ghu_|ghs_)/.test(t)) {
+          return "That does not look like a GitHub token — a real one starts with github_pat_ and is " +
+            "shown only once, in the box at the top of the page right after you press Generate token. " +
+            "If that box is gone, delete the token and generate a new one.";
+        }
+        if (t.length < 40) return "That looks cut off — the token is much longer. Use the copy button rather than selecting by hand.";
+        return "";
+      }
+
       $("cfg-save").onclick = async () => {
-        cfg = { repo: $("cfg-repo").value.trim().replace(/^https?:\/\/github\.com\//, ""), token: $("cfg-token").value.trim() };
-        save(K_CFG, cfg);
+        const typed = $("cfg-token").value.trim();
         const msg = $("setup-msg");
+        const complaint = tokenShapeComplaint(typed);
+        if (complaint) {
+          msg.textContent = "";
+          msg.append(el("div", { className: "banner err", textContent: complaint }));
+          return;
+        }
+        cfg = { repo: $("cfg-repo").value.trim().replace(/^https?:\/\/github\.com\//, ""), token: typed };
+        save(K_CFG, cfg);
         msg.textContent = "";
         msg.append(el("div", { className: "banner warn", textContent: "Checking…" }));
         try {
