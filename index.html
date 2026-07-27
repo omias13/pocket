@@ -316,7 +316,9 @@
       let busy = false;
 
       // ── dates ───────────────────────────────────────────────────────────────
-      const pad = (n) => String(n).padStart(2, "0");
+      // A declaration, not `const pad = …`: the state above calls todayStr() during parse, and a
+      // const in the temporal dead zone would take the whole page down before it ever painted.
+      function pad(n) { return String(n).padStart(2, "0"); }
       function ymd(d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
       function todayStr() { return ymd(new Date()); }
       function addDays(iso, n) {
@@ -591,7 +593,8 @@
         } else if (def.kind === "number" || def.kind === "exercise") {
           row.append(stepper(def, key, v));
         } else if (def.kind === "meals") {
-          row.append(el("button", { className: "chip", type: "button", textContent: "+ add" , onclick: () => addMeal(key) }));
+          row.append(el("button", { className: "chip", type: "button", textContent: mealOpen ? "close" : "+ add",
+            onclick: () => { mealOpen = !mealOpen; render(); } }));
         }
 
         const block = el("div", {});
@@ -637,6 +640,9 @@
         return wrap;
       }
 
+      /** Whether the food log's input row is open. One flag: only one food log is ever on screen. */
+      let mealOpen = false;
+
       function mealsRow(key, v) {
         const list = Array.isArray(v) ? v : [];
         const wrap = el("div", { className: "sub-row" });
@@ -647,16 +653,26 @@
           row.append(del);
           wrap.append(row);
         });
+        if (mealOpen) {
+          // An inline row rather than prompt(): a native dialog on a phone loses whatever was typed
+          // the moment the keyboard shoves the page around, and it cannot be styled or reopened.
+          const input = el("input", { type: "text", id: "meal-input", placeholder: "ข้าวมันไก่", enterKeyHint: "done" });
+          const add = el("button", { className: "primary", type: "button", textContent: "+", style: "padding:11px 15px" });
+          const commit = () => {
+            const text = input.value.trim();
+            if (!text) return;
+            setValue(selectedDate, key, list.concat([{ text: text.slice(0, 200) }]));
+            // render() has just replaced this input with a fresh empty one — put the cursor back,
+            // because meals are logged three at a time and re-tapping between each is a tax.
+            const next = document.getElementById("meal-input");
+            if (next) next.focus();
+          };
+          add.onclick = commit;
+          input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
+          const row = el("div", { className: "row" }, [input, add]);
+          wrap.append(row);
+        }
         return wrap;
-      }
-
-      function addMeal(key) {
-        const text = prompt("What did you eat?");
-        if (!text) return;
-        const cur = valueOf(selectedDate, key);
-        const list = Array.isArray(cur) ? cur.slice() : [];
-        list.push({ text: String(text).slice(0, 200) });
-        setValue(selectedDate, key, list);
       }
 
       function isMet(def, v) {
@@ -849,8 +865,19 @@
         render();
       };
 
+      // Two taps rather than confirm(): a native dialog inside a <dialog> is one more thing that
+      // can wedge the page, and the button can say what will happen instead of asking.
+      let forgetArmed = false;
       $("cfg-forget").onclick = () => {
-        if (!confirm("Remove the token from this phone? Anything not yet uploaded stays queued.")) return;
+        const btn = $("cfg-forget");
+        if (!forgetArmed) {
+          forgetArmed = true;
+          btn.textContent = "Tap again to remove";
+          setTimeout(() => { forgetArmed = false; btn.textContent = "Forget token"; }, 4000);
+          return;
+        }
+        forgetArmed = false;
+        btn.textContent = "Forget token";
         cfg.token = "";
         save(K_CFG, cfg);
         $("setup").close();
