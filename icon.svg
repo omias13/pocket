@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Omias Pocket">
+  <rect width="512" height="512" rx="112" fill="#141a24"/>
+  <!-- A pocket: the flap folded over a card. Two ticks inside, because what goes in is a check-in. -->
+  <path d="M120 176h272a24 24 0 0 1 24 24v168a24 24 0 0 1-24 24H120a24 24 0 0 1-24-24V200a24 24 0 0 1 24-24z"
+        fill="none" stroke="#e7ecf5" stroke-width="22" stroke-linejoin="round"/>
+  <path d="M96 208l160 78 160-78" fill="none" stroke="#e7ecf5" stroke-width="22"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+  <path d="M186 120h140" fill="none" stroke="#6ea8fe" stroke-width="22" stroke-linecap="round"/>
+</svg>
