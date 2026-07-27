@@ -1,0 +1,16 @@
+{
+  "name": "Omias Pocket",
+  "short_name": "Pocket",
+  "description": "The Omias check-in, on a phone — files what you enter even when the PC is off.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#141a24",
+  "theme_color": "#141a24",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
