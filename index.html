@@ -228,6 +228,11 @@
       .alert .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
       .alert .arrow { margin-left: auto; color: var(--muted-foreground); flex: none; }
       .alert.plain { color: var(--muted-foreground); }
+      .ask { border: 1px solid color-mix(in oklab, var(--primary) 45%, var(--border));
+             background: color-mix(in oklab, var(--primary) 8%, var(--card));
+             border-radius: var(--radius); padding: 11px 12px; margin: 10px 0; }
+      .ask .q { font-size: 14px; line-height: 1.45; }
+      .ask .why { font-size: 12px; color: var(--muted-foreground); margin-top: 4px; line-height: 1.4; }
       .clear {
         border: 1px solid color-mix(in oklab, var(--good) 40%, transparent);
         background: color-mix(in oklab, var(--good) 10%, var(--card));
@@ -261,11 +266,13 @@
       <div class="seg" id="views">
         <button type="button" id="view-home" class="on">Home</button>
         <button type="button" id="view-checkin">Check in</button>
+        <button type="button" id="view-spend">Spend</button>
       </div>
 
       <section id="pane-home">
         <div id="attention"></div>
         <div id="leaves"></div>
+        <div id="pause-tool"></div>
         <p class="foot" id="home-foot"></p>
       </section>
 
@@ -301,6 +308,39 @@
         </p>
         <div id="tasks"></div>
       </div>
+      </section>
+
+      <!--
+        Spend — the receipt is in the hand that is already holding this phone.
+
+        This is the whole reason the expense journal exists in Omias at all: an expense typed on
+        the PC in the evening is an expense half-remembered, and the ones that get forgotten are
+        never the small ones consistently. Amount first, because that is the only field that is
+        genuinely required; the category is one tap and the note is optional.
+
+        Nothing about the month's totals travels to this phone by design, so this screen can say
+        what you just filed and nothing more. "How much this month" is a question for the PC.
+      -->
+      <section id="pane-spend" hidden>
+        <div class="card">
+          <h2>Add an expense</h2>
+          <div class="row">
+            <input type="number" id="spend-amount" inputmode="decimal" min="0" step="any" placeholder="฿" enterkeyhint="done" />
+            <button class="primary" id="spend-add" style="padding: 13px 16px">+</button>
+          </div>
+          <div class="chips" id="spend-cats" style="margin-top: 10px"></div>
+          <input type="text" id="spend-note" placeholder="What for? (optional)" style="margin-top: 10px" />
+          <div class="chips" id="spend-days" style="margin-top: 10px"></div>
+          <p class="hint">
+            Filed straight to the journal on the PC. A receipt can be dated back up to three
+            months &mdash; unlike the check-in, filing an expense late is just filing an expense.
+          </p>
+        </div>
+
+        <div class="card" id="spend-filed-card" hidden>
+          <h2>Filed from this phone</h2>
+          <div id="spend-filed"></div>
+        </div>
       </section>
     </main>
 
@@ -359,11 +399,16 @@
        * shows up here as the correction, instead of this phone insisting on its own stale answer
        * for ever.
        */
-      let overlay = load(K_OVERLAY, { days: {}, done: {}, tasks: [] });
+      let overlay = load(K_OVERLAY, { days: {}, done: {}, tasks: [], pauses: [], ack: "", spend: [] });
+      // Older phones stored an overlay without these three; reading them back as undefined would
+      // take the home screen down on the first render after an update.
+      if (!Array.isArray(overlay.pauses)) overlay.pauses = [];
+      if (typeof overlay.ack !== "string") overlay.ack = "";
+      if (!Array.isArray(overlay.spend)) overlay.spend = [];
       /** Documents that could not be uploaded yet — a lift, a substation, a dead 4G cell. */
       let queue = load(K_QUEUE, []);
       /** Unsaved edits, this session only. Same shape as the overlay. */
-      let edits = { days: {}, done: {}, tasks: [] };
+      let edits = { days: {}, done: {}, tasks: [], pauses: [], ack: "", spend: [] };
 
       let selectedDate = todayStr();
       let selectedRoutine = routineForHour(new Date().getHours());
@@ -376,6 +421,13 @@
        * enter today's water". Home answers that in one glance and every line of it is a way in.
        */
       let view = "home";
+      /**
+       * Which pause reason is armed but not yet confirmed.
+       *
+       * Two taps, not one: this sits on a phone home screen and a stray tap that silently excused
+       * three days would be worse than no feature at all.
+       */
+      let pendingReason = null;
 
       // ── dates ───────────────────────────────────────────────────────────────
       // A declaration, not `const pad = …`: the state above calls todayStr() during parse, and a
@@ -509,7 +561,91 @@
         }
         for (const id of Object.keys(overlay.done)) if (!keep(overlay.done[id].at)) delete overlay.done[id];
         overlay.tasks = overlay.tasks.filter((t) => keep(t.at));
+        // A pause the PC has published back to us is no longer this phone's to remember — it is in
+        // snap.pauses now, and keeping both would draw the same trip twice.
+        overlay.pauses = overlay.pauses.filter((p) => keep(p.at));
+        // Once the PC has published a snapshot newer than the expense, the expense is in the
+        // journal there and this phone has no further claim on remembering it.
+        overlay.spend = overlay.spend.filter((s) => keep(s.at));
+        if (overlay.ackAt && !keep(overlay.ackAt)) { overlay.ack = ""; overlay.ackAt = ""; }
         save(K_OVERLAY, overlay);
+      }
+
+      // ── pauses: declared time away ──────────────────────────────────────────
+      // Mirrors src/lib/pauses.ts. A pause explains a gap, it never fills one: a paused day is
+      // still not a logged day, it just stops reading as a failure to show up.
+      const PAUSE_REASONS = [
+        { id: "upcountry", label: "ไป ตจว." },
+        { id: "abroad", label: "ไป ตปท." },
+        { id: "sick", label: "ป่วย" },
+        { id: "swamped", label: "งานถาโถม" },
+        { id: "other", label: "อื่นๆ" },
+      ];
+      const ASK_AFTER_SILENT_DAYS = 3;
+      const THAI_MONTH = ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+
+      function reasonLabel(id) {
+        const r = PAUSE_REASONS.find((x) => x.id === id);
+        return r ? r.label : "พัก";
+      }
+      /** "29 ก.ค." — Thai short date, พ.ศ. only when the year is not the current one. */
+      function thaiShort(iso) {
+        const [y, m, d] = iso.split("-").map(Number);
+        if (!y) return iso;
+        const s = d + " " + THAI_MONTH[m - 1];
+        return y === new Date().getFullYear() ? s : s + " " + String((y + 543) % 100);
+      }
+      function thaiRange(from, to) {
+        if (from === to) return thaiShort(from);
+        if (from.slice(0, 7) === to.slice(0, 7)) return Number(from.slice(8)) + "–" + thaiShort(to);
+        return thaiShort(from) + " – " + thaiShort(to);
+      }
+
+      /** Everything declared: what the PC published, plus what this phone has filed since. */
+      function allPauses() {
+        const mine = overlay.pauses.concat(edits.pauses).filter((p) => p.reason !== "skipped");
+        return ((snap && snap.pauses) || []).concat(mine);
+      }
+      function pauseOn(date) {
+        for (const p of allPauses()) if (date >= p.from && date <= p.to) return p;
+        return null;
+      }
+      /** The last day already answered as genuinely skipped — from either side. */
+      function ackThrough() {
+        const fromPc = (snap && snap.ackThrough) || "";
+        const mine = edits.ack || overlay.ack || "";
+        return mine > fromPc ? mine : fromPc;
+      }
+
+      /**
+       * The run of silent days immediately before today. Today is excluded: a day still in progress
+       * is not a gap, and asking about it at 09:00 is nagging.
+       */
+      function silentGap() {
+        const ack = ackThrough();
+        let cursor = addDays(todayStr(), -1);
+        let first = null, last = null, n = 0;
+        // Capped at the snapshot window: beyond it this phone has no evidence either way, and
+        // guessing "silent" from missing data would invent gaps that never happened.
+        while (n < SNAPSHOT_DAYS - 1) {
+          if (ack && cursor <= ack) break;
+          if (pauseOn(cursor)) break;
+          if (dayHasEntry(cursor)) break;
+          if (!last) last = cursor;
+          first = cursor;
+          n++;
+          cursor = addDays(cursor, -1);
+        }
+        if (!first || n < ASK_AFTER_SILENT_DAYS) return null;
+        return { from: first, to: last, days: n };
+      }
+
+      /** Declare a pause (or answer "I really did skip"). Queued like every other edit. */
+      function declarePause(reason, from, to) {
+        if (reason === "skipped") edits.ack = to;
+        else edits.pauses.push({ id: rid(), from: from, to: to, reason: reason, at: new Date().toISOString() });
+        pendingReason = null;
+        render();
       }
 
       // ── reading a value: snapshot, then what this phone knows on top ────────
@@ -552,6 +688,9 @@
         for (const d of Object.keys(edits.days)) n += Object.keys(edits.days[d]).length;
         n += Object.keys(edits.done).length;
         n += edits.tasks.length;
+        n += edits.pauses.length;
+        n += edits.spend.length;
+        if (edits.ack) n++;
         return n;
       }
 
@@ -570,10 +709,13 @@
         renderRoutines();
         renderHabits();
         renderTasks();
+        renderSpend();
         $("pane-home").hidden = view !== "home";
         $("pane-checkin").hidden = view !== "checkin";
+        $("pane-spend").hidden = view !== "spend";
         $("view-home").className = view === "home" ? "on" : "";
         $("view-checkin").className = view === "checkin" ? "on" : "";
+        $("view-spend").className = view === "spend" ? "on" : "";
         const n = pendingCount();
         $("btn-save").disabled = n === 0 || busy;
         $("btn-save").textContent = busy ? "Saving…" : n ? "Save " + n : "Save";
@@ -650,8 +792,13 @@
         let n = dayHasEntry(t) ? 1 : 0;
         let cursor = addDays(t, -1);
         let steps = 0;
-        while (steps < SNAPSHOT_DAYS && dayHasEntry(cursor)) {
-          n++;
+        while (steps < SNAPSHOT_DAYS) {
+          // A declared pause is stepped over, not counted: the run survives the trip without
+          // being paid for it. Same rule as computeStreak on the PC.
+          if (!pauseOn(cursor)) {
+            if (!dayHasEntry(cursor)) break;
+            n++;
+          }
           cursor = addDays(cursor, -1);
           steps++;
         }
@@ -697,6 +844,7 @@
         box.textContent = "";
         cards.textContent = "";
         $("home-foot").textContent = "";
+        $("pause-tool").textContent = "";
         if (!snap) {
           box.append(el("p", { className: "empty", textContent: "Nothing loaded yet — connect this phone in settings." }));
           return;
@@ -721,7 +869,10 @@
             text: queue.length + " save(s) not uploaded yet",
             go: () => doSave(),
           });
-        if (!dayHasEntry(today))
+        // A declared pause silences this one line and nothing else. The tasks and the reviews are
+        // not on holiday just because Dan is.
+        const onPause = pauseOn(today);
+        if (!dayHasEntry(today) && !onPause)
           alerts.push({ tone: "red", text: "Today isn't checked in", go: () => goCheckin(today) });
         if (sec.overdue.length)
           alerts.push({
@@ -737,12 +888,28 @@
         if (rev.month && !rev.monthDone)
           alerts.push({ tone: "amber", text: rev.month + " hasn't been reviewed — on the PC" });
 
-        if (!alerts.length) {
+        // Above the alerts, not inside them: being away is context for everything below rather
+        // than another thing to action.
+        if (onPause) {
+          const wrap = el("div", { className: "alerts" });
+          const line = el("div", { className: "alert plain" });
+          line.append(el("span", { className: "dot", style: "background:#8fa3bf" }));
+          line.append(el("span", {
+            textContent: "พักอยู่ · " + reasonLabel(onPause.reason) + " ถึง " + thaiShort(onPause.to),
+          }));
+          wrap.append(line);
+          box.append(wrap);
+        }
+
+        const gap = onPause ? null : silentGap();
+        if (gap) box.append(gapQuestion(gap));
+
+        if (!alerts.length && !onPause && !gap) {
           box.append(el("div", {
             className: "clear",
             textContent: "Nothing is waiting on you. Below is just where things stand.",
           }));
-        } else {
+        } else if (alerts.length) {
           const list = el("div", { className: "alerts" });
           for (const a of alerts.slice(0, ALERT_CAP)) {
             const row = el(a.go ? "button" : "div", { className: "alert" + (a.go ? "" : " plain") });
@@ -775,8 +942,10 @@
           sub: dayHasEntry(today)
             ? met + " met · " + (streak.capped ? streak.n + "+" : streak.n) +
               " day" + (streak.n === 1 ? "" : "s") + " in a row"
-            : "nothing recorded yet",
-          tone: dayHasEntry(today) ? "ok" : "red",
+            : onPause
+              ? "พัก · " + reasonLabel(onPause.reason) + " ถึง " + thaiShort(onPause.to)
+              : "nothing recorded yet",
+          tone: dayHasEntry(today) || onPause ? "ok" : "red",
           go: () => goCheckin(today),
         }));
 
@@ -802,9 +971,134 @@
           go: () => setView("checkin"),
         }));
 
+        renderPauseTool(onPause);
+
         $("home-foot").textContent =
           "Money, projects, stock and the machine stay on the PC. This phone's token reaches one " +
           "repo, and what travels through it is the check-in and the task list — nothing else.";
+      }
+
+      /**
+       * Declaring a pause before it happens — the case the whole feature exists for.
+       *
+       * The moment Dan is actually leaving is the moment the PC is off at home, so this is the only
+       * screen where "I'll be away" can be said at the time it is true. Three taps: open, reason,
+       * length. Editing and ending early stay on the PC; a pause ends by itself on its last day,
+       * so nothing here can leave the app permanently excused.
+       */
+      let pauseToolOpen = false;
+      let pauseDraftLen = 3;
+
+      function renderPauseTool(onPause) {
+        const box = $("pause-tool");
+        box.textContent = "";
+        if (onPause) {
+          box.append(el("p", {
+            className: "foot",
+            style: "margin-top:12px",
+            textContent: "พักถึง " + thaiShort(onPause.to) + " — จะสิ้นสุดเอง ถ้าจะแก้หรือจบก่อนกำหนด ทำที่คอม",
+          }));
+          return;
+        }
+        const bar = el("div", { className: "row", style: "margin-top:12px" });
+        const toggle = el("button", {
+          type: "button",
+          className: "chip" + (pauseToolOpen ? " on" : ""),
+          textContent: pauseToolOpen ? "ปิด" : "จะไม่อยู่ · ตั้งช่วงพัก",
+        });
+        toggle.onclick = () => { pauseToolOpen = !pauseToolOpen; pendingReason = null; render(); };
+        bar.append(toggle);
+        box.append(bar);
+        if (!pauseToolOpen) return;
+
+        const card = el("div", { className: "ask", style: "margin-top:8px" });
+        card.append(el("div", {
+          className: "q",
+          textContent: "พักกี่วัน นับจากวันนี้ (" + thaiShort(todayStr()) + ")",
+        }));
+        const lens = el("div", { className: "chips", style: "margin-top:8px" });
+        for (const n of [1, 2, 3, 5, 7, 14]) {
+          const b = el("button", {
+            type: "button",
+            className: "chip" + (pauseDraftLen === n ? " on" : ""),
+            textContent: n + " วัน",
+          });
+          b.onclick = () => { pauseDraftLen = n; render(); };
+          lens.append(b);
+        }
+        card.append(lens);
+
+        const to = addDays(todayStr(), pauseDraftLen - 1);
+        card.append(el("div", {
+          className: "why",
+          style: "margin-top:9px",
+          textContent: "ถึง " + thaiShort(to) + " · วันที่พักไม่ถูกนับว่าทำ และไม่ถูกนับเป็นตัวหาร",
+        }));
+
+        const chips = el("div", { className: "chips", style: "margin-top:8px" });
+        for (const r of PAUSE_REASONS) {
+          const armed = pendingReason === r.id;
+          const b = el("button", {
+            type: "button",
+            className: "chip" + (armed ? " on" : ""),
+            textContent: armed ? "ยืนยัน: " + r.label : r.label,
+          });
+          b.onclick = () => {
+            if (!armed) { pendingReason = r.id; render(); return; }
+            declarePause(r.id, todayStr(), to);
+            pauseToolOpen = false;
+            render();
+          };
+          chips.append(b);
+        }
+        card.append(chips);
+        box.append(card);
+      }
+
+      /**
+       * The question that makes a gap mean something: away, or actually skipped?
+       *
+       * It is on the phone because the phone is where Dan is when the days go missing. Answering
+       * it is two taps — arm a reason, confirm it — and either answer is recorded. There is no
+       * dismiss: "ข้ามจริง" IS the dismissal, and it is the honest one.
+       */
+      function gapQuestion(gap) {
+        const box = el("div", { className: "ask" });
+        box.append(el("div", {
+          className: "q",
+          textContent: gap.days + " วันที่ผ่านมาไม่มีบันทึกเลย (" + thaiRange(gap.from, gap.to) + ") — หายไปเพราะอะไร?",
+        }));
+        box.append(el("div", {
+          className: "why",
+          textContent: "ตอบครั้งเดียว แล้วจะไม่ถามซ้ำ — \"ไปธุระ\" กับ \"ไม่ได้ทำ\" ไม่ควรหน้าตาเหมือนกันบนกราฟ",
+        }));
+        const chips = el("div", { className: "chips", style: "margin-top:9px" });
+        for (const r of PAUSE_REASONS) {
+          const armed = pendingReason === r.id;
+          const b = el("button", {
+            type: "button",
+            className: "chip" + (armed ? " on" : ""),
+            textContent: armed ? "ยืนยัน: " + r.label : r.label,
+          });
+          b.onclick = () => {
+            if (armed) declarePause(r.id, gap.from, gap.to);
+            else { pendingReason = r.id; render(); }
+          };
+          chips.append(b);
+        }
+        const skipArmed = pendingReason === "skipped";
+        const skip = el("button", {
+          type: "button",
+          className: "chip" + (skipArmed ? " on" : ""),
+          textContent: skipArmed ? "ยืนยัน: ข้ามจริง" : "ข้ามจริง",
+        });
+        skip.onclick = () => {
+          if (skipArmed) declarePause("skipped", gap.from, gap.to);
+          else { pendingReason = "skipped"; render(); }
+        };
+        chips.append(skip);
+        box.append(chips);
+        return box;
       }
 
       function leaf(o) {
@@ -1047,6 +1341,105 @@
         }
       }
 
+      // ── spend ───────────────────────────────────────────────────────────────
+      // The category list comes down in the snapshot as names only. That is deliberate: this app
+      // lives in a repo whose token sits on a phone, so a menu may travel and a total may not.
+
+      /** Which category is armed for the next expense. Sticky between entries on purpose. */
+      let spendCat = "";
+      /** Which day the next expense is filed for. Also sticky — a shop run is one day, many lines. */
+      let spendDate = todayStr();
+      /** How far back the day chips reach. The PC accepts a quarter; three days covers the phone. */
+      const SPEND_DAY_CHIPS = 4;
+
+      function spendCats() {
+        return (snap && Array.isArray(snap.spendCats) ? snap.spendCats : []).filter((c) => c && c.id);
+      }
+
+      function renderSpend() {
+        const cats = spendCats();
+        const catBox = $("spend-cats");
+        catBox.textContent = "";
+        if (!cats.length) {
+          catBox.append(
+            el("p", {
+              className: "empty",
+              textContent: snap
+                ? "No categories yet — set them up on the PC."
+                : "Not connected yet.",
+            }),
+          );
+        } else {
+          // "None" first, so an expense can always be filed even when none of the buttons fit.
+          // A number with no category still counts; a number never entered does not.
+          const none = el("button", { className: "chip" + (spendCat ? "" : " on"), type: "button", textContent: "—" });
+          none.onclick = () => { spendCat = ""; render(); };
+          catBox.append(none);
+          for (const c of cats) {
+            const b = el("button", {
+              className: "chip" + (spendCat === c.id ? " on" : ""),
+              type: "button",
+              textContent: c.name,
+            });
+            b.onclick = () => { spendCat = c.id; render(); };
+            catBox.append(b);
+          }
+        }
+
+        const dayBox = $("spend-days");
+        dayBox.textContent = "";
+        for (let i = 0; i < SPEND_DAY_CHIPS; i++) {
+          const d = addDays(todayStr(), -i);
+          const b = el("button", {
+            className: "chip" + (spendDate === d ? " on" : ""),
+            type: "button",
+            textContent: i === 0 ? "วันนี้" : i === 1 ? "เมื่อวาน" : thaiShort(d),
+          });
+          b.onclick = () => { spendDate = d; render(); };
+          dayBox.append(b);
+        }
+
+        const filed = overlay.spend.concat(edits.spend);
+        $("spend-filed-card").hidden = filed.length === 0;
+        const box = $("spend-filed");
+        box.textContent = "";
+        // Newest first: the one just entered is the one being checked.
+        for (const s of filed.slice().reverse()) {
+          const cat = cats.find((c) => c.id === s.cat);
+          const meta = [s.date];
+          if (cat) meta.push(cat.name);
+          box.append(
+            el("div", { className: "task" }, [
+              el("div", { className: "txt" }, [
+                document.createTextNode("฿" + Number(s.amountThb).toLocaleString() + (s.note ? " · " + s.note : "")),
+                el("div", { className: "meta" }, [el("span", { textContent: meta.join(" · ") })]),
+              ]),
+            ]),
+          );
+        }
+      }
+
+      function addSpend() {
+        const input = $("spend-amount");
+        const amount = Number(input.value);
+        if (!Number.isFinite(amount) || amount <= 0) return;
+        const note = $("spend-note").value.trim();
+        edits.spend.push({
+          // The id is minted here, not on the PC. That is what makes a document drained twice
+          // land on the same key instead of charging the month a second time.
+          id: rid(),
+          date: spendDate,
+          amountThb: amount,
+          cat: spendCat || undefined,
+          note: note || undefined,
+          at: new Date().toISOString(),
+        });
+        input.value = "";
+        $("spend-note").value = "";
+        input.focus();
+        render();
+      }
+
       // ── saving ──────────────────────────────────────────────────────────────
       function buildDoc() {
         const filedAt = new Date().toISOString();
@@ -1067,6 +1460,17 @@
         for (const t of edits.tasks) actions.push({ kind: "task", id: t.id, line: t.line, mode: t.mode });
         for (const [id, rec] of Object.entries(edits.done)) {
           actions.push({ kind: "todoDone", id: id, done: rec.v, at: rec.at });
+        }
+        for (const p of edits.pauses) {
+          actions.push({ kind: "pause", id: p.id, from: p.from, to: p.to, reason: p.reason });
+        }
+        for (const s of edits.spend) {
+          actions.push({ kind: "spend", id: s.id, date: s.date, amountThb: s.amountThb, cat: s.cat, note: s.note });
+        }
+        // "I really did skip those" travels as a pause with reason "skipped": the PC records the
+        // answer and stops asking, without marking the days as excused.
+        if (edits.ack) {
+          actions.push({ kind: "pause", id: rid(), from: edits.ack, to: edits.ack, reason: "skipped" });
         }
         // filedDate as well as filedAt: an instant is not a date. 22:40 UTC on Sunday is already
         // Monday in Bangkok, so a PC deriving the day from the timestamp can push a Sunday-evening
@@ -1090,8 +1494,14 @@
         }
         for (const [id, rec] of Object.entries(edits.done)) overlay.done[id] = { v: rec.v, at: stamp };
         for (const t of edits.tasks) overlay.tasks.push({ ...t, at: stamp });
+        for (const p of edits.pauses) overlay.pauses.push({ ...p, at: stamp });
+        for (const s of edits.spend) overlay.spend.push({ ...s, at: stamp });
+        if (edits.ack && edits.ack > (overlay.ack || "")) {
+          overlay.ack = edits.ack;
+          overlay.ackAt = stamp;
+        }
         save(K_OVERLAY, overlay);
-        edits = { days: {}, done: {}, tasks: [] };
+        edits = { days: {}, done: {}, tasks: [], pauses: [], ack: "", spend: [] };
       }
 
       async function flushQueue() {
@@ -1223,6 +1633,13 @@
 
       $("view-home").onclick = () => setView("home");
       $("view-checkin").onclick = () => setView("checkin");
+      $("view-spend").onclick = () => setView("spend");
+      $("spend-add").onclick = addSpend;
+      for (const id of ["spend-amount", "spend-note"]) {
+        $(id).addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); addSpend(); }
+        });
+      }
       $("btn-settings").onclick = openSetup;
       $("btn-save").onclick = doSave;
       $("task-add").onclick = addTask;
