@@ -153,6 +153,8 @@
 
       .sub-row { padding: 0 0 10px 0; }
       .meal { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 14px; }
+      .meal span:first-child { flex: 1; min-width: 0; }
+      .meal-thb { font-variant-numeric: tabular-nums; color: var(--muted-foreground); }
       .meal button { background: none; border: 0; color: var(--muted-foreground); font-size: 17px; cursor: pointer; }
 
       input[type="text"], input[type="password"], input[type="number"] {
@@ -1255,7 +1257,10 @@
         const list = Array.isArray(v) ? v : [];
         const wrap = el("div", { className: "sub-row" });
         list.forEach((m, i) => {
-          const row = el("div", { className: "meal" }, [el("span", { textContent: "• " + (m.text || "") })]);
+          const row = el("div", { className: "meal" }, [
+            el("span", { textContent: "• " + (m.text || "") }),
+            m.thb > 0 ? el("span", { className: "meal-thb", textContent: "฿" + m.thb }) : null,
+          ].filter(Boolean));
           const del = el("button", { type: "button", textContent: "×", title: "remove" });
           del.onclick = () => setValue(selectedDate, key, list.filter((_, j) => j !== i));
           row.append(del);
@@ -1265,11 +1270,17 @@
           // An inline row rather than prompt(): a native dialog on a phone loses whatever was typed
           // the moment the keyboard shoves the page around, and it cannot be styled or reopened.
           const input = el("input", { type: "text", id: "meal-input", placeholder: "ข้าวมันไก่", enterKeyHint: "done" });
+          // A price here files the meal on /money as well, so lunch is typed once. The link is made
+          // on the PC during the drain, which is the only side that knows what ids are already taken.
+          const price = el("input", { type: "number", id: "meal-thb", placeholder: "฿", inputMode: "decimal", min: "0", step: "any", style: "max-width:74px;text-align:right" });
           const add = el("button", { className: "primary", type: "button", textContent: "+", style: "padding:11px 15px" });
           const commit = () => {
             const text = input.value.trim();
             if (!text) return;
-            setValue(selectedDate, key, list.concat([{ text: text.slice(0, 200) }]));
+            const thb = Number(price.value);
+            const item = { text: text.slice(0, 200) };
+            if (Number.isFinite(thb) && thb > 0) item.thb = thb;
+            setValue(selectedDate, key, list.concat([item]));
             // render() has just replaced this input with a fresh empty one — put the cursor back,
             // because meals are logged three at a time and re-tapping between each is a tax.
             const next = document.getElementById("meal-input");
@@ -1277,7 +1288,8 @@
           };
           add.onclick = commit;
           input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
-          const row = el("div", { className: "row" }, [input, add]);
+          price.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
+          const row = el("div", { className: "row" }, [input, price, add]);
           wrap.append(row);
         }
         return wrap;
