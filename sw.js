@@ -13,7 +13,7 @@
  * api.github.com is never cached. A stale snapshot is worse than no snapshot — the page already
  * keeps its own copy in localStorage and says how old it is.
  */
-const CACHE = "pocket-shell-v4";
+const CACHE = "pocket-shell-v5";
 const SHELL = ["./", "./index.html", "./manifest.json", "./icon.svg", "./icon.png", "./icon-maskable.png"];
 
 self.addEventListener("install", (e) => {
