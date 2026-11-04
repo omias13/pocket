@@ -514,11 +514,15 @@
       const K_QUEUE = "pocket.queue";
       const K_OVERLAY = "pocket.overlay";
 
+      // Demo mode reads and writes nothing: it shares an origin (and so localStorage) with the
+      // installed app, and persisting the fake cfg/snapshot/overlay would replace the real token
+      // and erase this phone's unsynced overlay just by opening a ?demo=1 link.
       const load = (k, fallback) => {
+        if (DEMO) return fallback;
         try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; }
         catch { return fallback; }
       };
-      const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+      const save = (k, v) => { if (DEMO) return; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
       let cfg = load(K_CFG, { repo: "omias13/pocket-data", token: "" });
       let snap = load(K_SNAP, null);
@@ -680,6 +684,10 @@
             content: b64(JSON.stringify(doc, null, 2) + "\n"),
           }),
         });
+        // The name is unique per document, so 422 ("sha wasn't supplied") means this exact doc is
+        // already in the inbox: an earlier PUT landed but its response was lost. Treat as done,
+        // or the queue would retry it forever and every later save would sit behind it.
+        if (res.status === 422) return;
         if (!res.ok) throw new Error("upload failed: " + res.status + " " + (await res.text()).slice(0, 160));
       }
 
@@ -1956,10 +1964,15 @@
       $("mode-event").onclick = () => setAddMode("event");
       $("task-line").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTask(); } });
       $("btn-refresh").onclick = async () => {
+        // Same guard as doSave: two flushes at once would upload queue[0] twice and then shift
+        // two entries off the queue for one upload.
+        if (busy) return;
+        busy = true;
         window.__lastError = "";
         setStatus("Loading…");
         try { await flushQueue(); await pullSnapshot(); setStatus("Up to date"); }
         catch (err) { window.__lastError = err.message; setStatus(""); }
+        finally { busy = false; }
         render();
       };
 
