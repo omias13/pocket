@@ -13,7 +13,7 @@
  * api.github.com is never cached. A stale snapshot is worse than no snapshot — the page already
  * keeps its own copy in localStorage and says how old it is.
  */
-const CACHE = "pocket-shell-v6"; // v6: ember redesign — moved into the Omias agent repo
+const CACHE = "pocket-shell-v7"; // v7: demo mode no longer touches storage; sw clone fix
 const SHELL = ["./", "./index.html", "./manifest.json", "./icon.svg", "./icon.png", "./icon-maskable.png"];
 
 self.addEventListener("install", (e) => {
@@ -37,7 +37,12 @@ self.addEventListener("fetch", (e) => {
     caches.match(e.request).then((hit) => {
       const live = fetch(e.request)
         .then((res) => {
-          if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
+          // Clone now, before the page reads the body; cloning later inside then() throws once
+          // the original has been consumed and the cache silently never updates.
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(e.request, copy));
+          }
           return res;
         })
         .catch(() => hit); // offline: whatever is cached, or a genuine failure if nothing is
