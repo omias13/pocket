@@ -13,7 +13,7 @@
  * api.github.com is never cached. A stale snapshot is worse than no snapshot — the page already
  * keeps its own copy in localStorage and says how old it is.
  */
-const CACHE = "pocket-shell-v7"; // v7: slip scan + share target + shortcuts
+const CACHE = "pocket-shell-v8"; // v8: Log box (text/photo captures) + share target + shortcuts
 const SHARE_CACHE = "pocket-share"; // a shared image waits here until the page picks it up
 const SHELL = ["./", "./index.html", "./manifest.json", "./icon.svg", "./icon.png", "./icon-maskable.png"];
 
@@ -34,7 +34,7 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
 
   // Android "Share > Pocket": the OS POSTs the image here. Park it in a cache and bounce to the
-  // Spend pane, which reads it back. Not .keys-filtered by CACHE above, so activate keeps it.
+  // Log box on Home, which sends it to the PC. SHARE_CACHE is spared by activate below.
   if (e.request.method === "POST" && url.origin === self.location.origin && url.pathname.endsWith("/share-target")) {
     e.respondWith(
       (async () => {
@@ -46,7 +46,7 @@ self.addEventListener("fetch", (e) => {
             await c.put("shared-slip", new Response(file, { headers: { "content-type": file.type || "image/jpeg" } }));
           }
         } catch { /* a failed share just opens the app */ }
-        return Response.redirect("./index.html?view=spend&shared=1", 303);
+        return Response.redirect("./index.html?view=home&shared=1", 303);
       })(),
     );
     return;
