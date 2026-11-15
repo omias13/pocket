@@ -7,7 +7,7 @@
   "display": "standalone",
   "orientation": "portrait",
   "shortcuts": [
-    { "name": "Scan slip", "short_name": "Slip", "url": "./index.html?view=spend&scan=1", "icons": [{ "src": "icon.png", "sizes": "512x512", "type": "image/png" }] },
+    { "name": "Log", "short_name": "Log", "url": "./index.html?view=home&log=1", "icons": [{ "src": "icon.png", "sizes": "512x512", "type": "image/png" }] },
     { "name": "Add expense", "short_name": "Expense", "url": "./index.html?view=spend", "icons": [{ "src": "icon.png", "sizes": "512x512", "type": "image/png" }] },
     { "name": "Add task", "short_name": "Task", "url": "./index.html?view=checkin", "icons": [{ "src": "icon.png", "sizes": "512x512", "type": "image/png" }] }
   ],
