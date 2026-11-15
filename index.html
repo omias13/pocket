@@ -445,6 +445,11 @@
             <input type="number" id="spend-amount" inputmode="decimal" min="0" step="any" placeholder="฿ amount" enterkeyhint="done" />
             <button class="btn-add" id="spend-add" title="Add">+</button>
           </div>
+          <div class="row" style="margin-top: 10px">
+            <label class="btn-add" for="slip-file" style="width: auto; padding: 0 16px; display: inline-flex; align-items: center; cursor: pointer">Scan slip</label>
+            <input type="file" id="slip-file" accept="image/*" capture="environment" hidden />
+            <span class="hint" id="slip-status" style="margin: 0 0 0 10px"></span>
+          </div>
           <div class="chips" id="spend-cats" style="margin-top: 10px"></div>
           <input type="text" id="spend-note" placeholder="What for? (optional)" style="margin-top: 10px" class="th" />
           <div class="chips" id="spend-days" style="margin-top: 10px"></div>
@@ -513,16 +518,13 @@
       const K_SNAP = "pocket.snapshot";
       const K_QUEUE = "pocket.queue";
       const K_OVERLAY = "pocket.overlay";
+      const K_SLIPS = "pocket.slips";
 
-      // Demo mode reads and writes nothing: it shares an origin (and so localStorage) with the
-      // installed app, and persisting the fake cfg/snapshot/overlay would replace the real token
-      // and erase this phone's unsynced overlay just by opening a ?demo=1 link.
       const load = (k, fallback) => {
-        if (DEMO) return fallback;
         try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; }
         catch { return fallback; }
       };
-      const save = (k, v) => { if (DEMO) return; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+      const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
       let cfg = load(K_CFG, { repo: "omias13/pocket-data", token: "" });
       let snap = load(K_SNAP, null);
@@ -684,10 +686,6 @@
             content: b64(JSON.stringify(doc, null, 2) + "\n"),
           }),
         });
-        // The name is unique per document, so 422 ("sha wasn't supplied") means this exact doc is
-        // already in the inbox: an earlier PUT landed but its response was lost. Treat as done,
-        // or the queue would retry it forever and every later save would sit behind it.
-        if (res.status === 422) return;
         if (!res.ok) throw new Error("upload failed: " + res.status + " " + (await res.text()).slice(0, 160));
       }
 
@@ -1819,6 +1817,65 @@
           queue.shift();
           save(K_QUEUE, queue);
         }
+        await flushSlips();
+      }
+
+      // ── slips ───────────────────────────────────────────────────────────────
+      // A photo of a receipt goes to slips/ in the data repo, NOT through inbox/: the PC reads it
+      // with Gemini and files the expense itself (pocket-sync.js drainSlips), so nothing on this
+      // phone has to be typed. The file name carries the phone's date and a phone-minted id, which
+      // is what keeps a re-drain from filing the same slip twice.
+      let slips = load(K_SLIPS, []);
+
+      /** Shrink to ~1000px JPEG: a receipt stays readable, and the repo does not balloon. */
+      function slipToJpeg(file) {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          const url = URL.createObjectURL(file);
+          img.onload = () => {
+            const k = Math.min(1, 1000 / Math.max(img.width, img.height));
+            const c = document.createElement("canvas");
+            c.width = Math.round(img.width * k);
+            c.height = Math.round(img.height * k);
+            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            URL.revokeObjectURL(url);
+            resolve(c.toDataURL("image/jpeg", 0.72).split(",")[1]);
+          };
+          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("not an image")); };
+          img.src = url;
+        });
+      }
+
+      async function flushSlips() {
+        if (DEMO || !cfg.token) return;
+        while (slips.length) {
+          const s = slips[0];
+          const res = await gh("/repos/" + cfg.repo + "/contents/slips/" + s.date + "_" + s.id + ".jpg", {
+            method: "PUT",
+            body: JSON.stringify({ message: "pocket: slip " + s.id, content: s.data }),
+          });
+          // 422 = that exact file is already there (an earlier attempt landed but the reply was lost)
+          if (!res.ok && res.status !== 422) throw new Error("slip upload failed: " + res.status);
+          slips.shift();
+          save(K_SLIPS, slips);
+        }
+      }
+
+      async function addSlip(file) {
+        const st = $("slip-status");
+        try {
+          const data = await slipToJpeg(file);
+          slips.push({ id: rid(), date: spendDate || todayStr(), data: data });
+          // save() swallows quota errors on purpose; here a silent failure would lose the photo.
+          try { localStorage.setItem(K_SLIPS, JSON.stringify(slips)); }
+          catch { slips.pop(); st.textContent = "Phone storage full — send the queue first"; return; }
+          st.textContent = "Slip saved — sending…";
+          await flushSlips();
+          st.textContent = "Slip sent — the PC will read it";
+        } catch (err) {
+          st.textContent = slips.length ? "Slip kept on phone — will retry" : "Could not read that image";
+        }
+        render();
       }
 
       async function doSave() {
@@ -1952,6 +2009,30 @@
       $("view-checkin").onclick = () => setView("checkin");
       $("view-spend").onclick = () => setView("spend");
       $("spend-add").onclick = addSpend;
+      $("slip-file").addEventListener("change", (e) => {
+        const f = e.target.files && e.target.files[0];
+        e.target.value = "";
+        if (f) addSlip(f);
+      });
+
+      // Opened from a home-screen shortcut (?view=spend) or from Android's Share sheet (?shared=1,
+      // image parked by sw.js). Strip the query afterwards so a reload does not repeat the share.
+      (async () => {
+        const q = new URLSearchParams(location.search);
+        const v = q.get("view");
+        if (v === "home" || v === "checkin" || v === "spend") view = v;
+        if (q.get("shared") && "caches" in window) {
+          try {
+            const c = await caches.open("pocket-share");
+            const hit = await c.match("shared-slip");
+            if (hit) {
+              await c.delete("shared-slip");
+              await addSlip(await hit.blob());
+            }
+          } catch { /* nothing shared after all */ }
+        }
+        if (q.toString()) history.replaceState(null, "", location.pathname);
+      })();
       for (const id of ["spend-amount", "spend-note"]) {
         $(id).addEventListener("keydown", (e) => {
           if (e.key === "Enter") { e.preventDefault(); addSpend(); }
@@ -1964,15 +2045,10 @@
       $("mode-event").onclick = () => setAddMode("event");
       $("task-line").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTask(); } });
       $("btn-refresh").onclick = async () => {
-        // Same guard as doSave: two flushes at once would upload queue[0] twice and then shift
-        // two entries off the queue for one upload.
-        if (busy) return;
-        busy = true;
         window.__lastError = "";
         setStatus("Loading…");
         try { await flushQueue(); await pullSnapshot(); setStatus("Up to date"); }
         catch (err) { window.__lastError = err.message; setStatus(""); }
-        finally { busy = false; }
         render();
       };
 
