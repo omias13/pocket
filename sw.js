@@ -13,7 +13,8 @@
  * api.github.com is never cached. A stale snapshot is worse than no snapshot — the page already
  * keeps its own copy in localStorage and says how old it is.
  */
-const CACHE = "pocket-shell-v7"; // v7: demo mode no longer touches storage; sw clone fix
+const CACHE = "pocket-shell-v7"; // v7: slip scan + share target + shortcuts
+const SHARE_CACHE = "pocket-share"; // a shared image waits here until the page picks it up
 const SHELL = ["./", "./index.html", "./manifest.json", "./icon.svg", "./icon.png", "./icon-maskable.png"];
 
 self.addEventListener("install", (e) => {
@@ -24,25 +25,40 @@ self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== SHARE_CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
 
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
+
+  // Android "Share > Pocket": the OS POSTs the image here. Park it in a cache and bounce to the
+  // Spend pane, which reads it back. Not .keys-filtered by CACHE above, so activate keeps it.
+  if (e.request.method === "POST" && url.origin === self.location.origin && url.pathname.endsWith("/share-target")) {
+    e.respondWith(
+      (async () => {
+        try {
+          const form = await e.request.formData();
+          const file = form.get("slip");
+          if (file && file.size) {
+            const c = await caches.open(SHARE_CACHE);
+            await c.put("shared-slip", new Response(file, { headers: { "content-type": file.type || "image/jpeg" } }));
+          }
+        } catch { /* a failed share just opens the app */ }
+        return Response.redirect("./index.html?view=spend&shared=1", 303);
+      })(),
+    );
+    return;
+  }
+
   if (e.request.method !== "GET" || url.origin !== self.location.origin) return;
 
   e.respondWith(
     caches.match(e.request).then((hit) => {
       const live = fetch(e.request)
         .then((res) => {
-          // Clone now, before the page reads the body; cloning later inside then() throws once
-          // the original has been consumed and the cache silently never updates.
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(e.request, copy));
-          }
+          if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
           return res;
         })
         .catch(() => hit); // offline: whatever is cached, or a genuine failure if nothing is
