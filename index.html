@@ -153,6 +153,10 @@
         background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
         padding: 14px; margin: 10px 0;
       }
+      .cap-ok { color: var(--good); }
+      .cap-amber { color: var(--warn); }
+      .cap-bad { color: var(--bad); }
+      #cap-list { margin-top: 8px; }
       .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
         color: var(--muted-foreground); margin: 0 0 10px; font-weight: 700; }
 
@@ -384,6 +388,21 @@
       </div>
 
       <section id="pane-home">
+        <div class="card" id="cap-card">
+          <h2>Log</h2>
+          <div class="row">
+            <input type="text" id="cap-text" class="th" placeholder="กะเพราหมู 90 · วิ่ง 30 นาที · หาร 2" enterkeyhint="send" />
+            <button class="btn-add" id="cap-send" title="Send">+</button>
+          </div>
+          <div class="row" style="margin-top: 10px; align-items: center">
+            <label class="chip" for="cap-cam">Camera</label>
+            <input type="file" id="cap-cam" accept="image/*" capture="environment" hidden />
+            <label class="chip" for="cap-pick" style="margin-left: 6px">Gallery</label>
+            <input type="file" id="cap-pick" accept="image/*" hidden />
+            <span class="hint" id="cap-status" style="margin: 0 0 0 10px"></span>
+          </div>
+          <div id="cap-list" hidden></div>
+        </div>
         <div id="attention"></div>
         <div id="leaves"></div>
         <div class="card" id="open-tasks" hidden></div>
@@ -446,9 +465,9 @@
             <button class="btn-add" id="spend-add" title="Add">+</button>
           </div>
           <div class="row" style="margin-top: 10px">
-            <label class="btn-add" for="slip-file" style="width: auto; padding: 0 16px; display: inline-flex; align-items: center; cursor: pointer">Scan slip</label>
-            <input type="file" id="slip-file" accept="image/*" capture="environment" hidden />
-            <span class="hint" id="slip-status" style="margin: 0 0 0 10px"></span>
+            <label class="btn-add" for="slip-file" style="width: auto; padding: 0 16px; display: inline-flex; align-items: center; cursor: pointer">Photo of slip</label>
+            <input type="file" id="slip-file" accept="image/*" hidden />
+            <span class="hint" style="margin: 0 0 0 10px">or use Log on Home</span>
           </div>
           <div class="chips" id="spend-cats" style="margin-top: 10px"></div>
           <input type="text" id="spend-note" placeholder="What for? (optional)" style="margin-top: 10px" class="th" />
@@ -518,7 +537,7 @@
       const K_SNAP = "pocket.snapshot";
       const K_QUEUE = "pocket.queue";
       const K_OVERLAY = "pocket.overlay";
-      const K_SLIPS = "pocket.slips";
+      const K_CAPS = "pocket.caps";
 
       const load = (k, fallback) => {
         try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; }
@@ -672,6 +691,7 @@
         const doc = JSON.parse(await res.text());
         snap = doc;
         save(K_SNAP, doc);
+        try { await pullCapFailed(); } catch { /* status only */ }
         pruneOverlay();
         return doc;
       }
@@ -873,6 +893,7 @@
         renderHabits();
         renderTasks();
         renderSpend();
+        renderCaps();
         $("pane-home").hidden = view !== "home";
         $("pane-checkin").hidden = view !== "checkin";
         $("pane-spend").hidden = view !== "spend";
@@ -1817,18 +1838,23 @@
           queue.shift();
           save(K_QUEUE, queue);
         }
-        await flushSlips();
+        await flushCaps();
       }
 
-      // ── slips ───────────────────────────────────────────────────────────────
-      // A photo of a receipt goes to slips/ in the data repo, NOT through inbox/: the PC reads it
-      // with Gemini and files the expense itself (pocket-sync.js drainSlips), so nothing on this
-      // phone has to be typed. The file name carries the phone's date and a phone-minted id, which
-      // is what keeps a re-drain from filing the same slip twice.
-      let slips = load(K_SLIPS, []);
+      // ── captures ("just tell me") ───────────────────────────────────────────
+      // One box for everything Dan used to send to Discord #rhythm: "กะเพราหมู 90", "วิ่ง 30 นาที",
+      // "ปิงซู 920 กินกัน 4 คน", or just a photo of the plate / the slip. The phone does no reading;
+      // it files captures/<date>_<id>.json and the PC reads it the same way Discord is read
+      // (pocket-sync.js drainCaptures). Status comes back two ways: the snapshot lists what landed
+      // (snap.captures) and captures/failed/ holds what could not be read — so nothing goes quiet.
+      let caps = load(K_CAPS, []);
+      // One-time carry-over of slips queued by the short-lived slips/ build.
+      for (const s of load("pocket.slips", [])) caps.push({ id: s.id, date: s.date, text: "", photo: s.data, at: new Date().toISOString(), sent: false });
+      try { localStorage.removeItem("pocket.slips"); } catch { /* fine */ }
+      let capFailed = {};
 
-      /** Shrink to ~1000px JPEG: a receipt stays readable, and the repo does not balloon. */
-      function slipToJpeg(file) {
+      /** Shrink to ~1000px JPEG: a slip stays readable, a plate stays recognisable, the repo stays small. */
+      function toJpeg(file) {
         return new Promise((resolve, reject) => {
           const img = new Image();
           const url = URL.createObjectURL(file);
@@ -1846,36 +1872,83 @@
         });
       }
 
-      async function flushSlips() {
+      function saveCaps() {
+        // A photo is only kept until it is uploaded; after that the line is just text and a status.
+        const landed = new Set(((snap && snap.captures) || []).map((c) => c.id));
+        const cut = Date.now() - 3 * 86400000;
+        caps = caps.filter((c) => !(c.sent && landed.has("dc" + c.id) && new Date(c.at).getTime() < cut)).slice(-30);
+        try { localStorage.setItem(K_CAPS, JSON.stringify(caps)); return true; } catch { return false; }
+      }
+
+      async function flushCaps() {
         if (DEMO || !cfg.token) return;
-        while (slips.length) {
-          const s = slips[0];
-          const res = await gh("/repos/" + cfg.repo + "/contents/slips/" + s.date + "_" + s.id + ".jpg", {
+        for (const c of caps) {
+          if (c.sent) continue;
+          const body = { v: 1, id: c.id, date: c.date, text: c.text || "", ...(c.photo ? { photo: c.photo } : {}) };
+          const res = await gh("/repos/" + cfg.repo + "/contents/captures/" + c.date + "_" + c.id + ".json", {
             method: "PUT",
-            body: JSON.stringify({ message: "pocket: slip " + s.id, content: s.data }),
+            body: JSON.stringify({ message: "pocket: capture " + c.id, content: b64(JSON.stringify(body)) }),
           });
-          // 422 = that exact file is already there (an earlier attempt landed but the reply was lost)
-          if (!res.ok && res.status !== 422) throw new Error("slip upload failed: " + res.status);
-          slips.shift();
-          save(K_SLIPS, slips);
+          // 422 = already there (an earlier try landed but its reply was lost)
+          if (!res.ok && res.status !== 422) throw new Error("capture upload failed: " + res.status);
+          c.sent = true;
+          delete c.photo;
+          saveCaps();
         }
       }
 
-      async function addSlip(file) {
-        const st = $("slip-status");
-        try {
-          const data = await slipToJpeg(file);
-          slips.push({ id: rid(), date: spendDate || todayStr(), data: data });
-          // save() swallows quota errors on purpose; here a silent failure would lose the photo.
-          try { localStorage.setItem(K_SLIPS, JSON.stringify(slips)); }
-          catch { slips.pop(); st.textContent = "Phone storage full — send the queue first"; return; }
-          st.textContent = "Slip saved — sending…";
-          await flushSlips();
-          st.textContent = "Slip sent — the PC will read it";
-        } catch (err) {
-          st.textContent = slips.length ? "Slip kept on phone — will retry" : "Could not read that image";
+      /** Which sent captures the PC could not read — they wait in captures/failed/. */
+      async function pullCapFailed() {
+        if (DEMO || !cfg.token || !caps.some((c) => c.sent)) return;
+        const res = await gh("/repos/" + cfg.repo + "/contents/captures/failed");
+        if (!res.ok) { capFailed = {}; return; }
+        capFailed = {};
+        for (const f of await res.json()) {
+          const m = /^\d{4}-\d{2}-\d{2}_([a-z0-9]{8})\.json$/.exec(f.name || "");
+          if (m) capFailed[m[1]] = true;
         }
+      }
+
+      async function addCapture(text, file) {
+        const st = $("cap-status");
+        let photo;
+        if (file) {
+          try { photo = await toJpeg(file); }
+          catch { st.textContent = "Could not read that image"; return; }
+        }
+        text = (text || "").trim();
+        if (!text && !photo) return;
+        caps.push({ id: rid(), date: todayStr(), text, photo, at: new Date().toISOString(), sent: false });
+        if (!saveCaps()) { caps.pop(); st.textContent = "Phone storage full — try again with signal"; return; }
+        $("cap-text").value = "";
+        st.textContent = "Sending…";
         render();
+        try { await flushCaps(); st.textContent = "Sent — the PC files it next time it syncs"; }
+        catch { st.textContent = "Kept on this phone — will send when there is signal"; }
+        render();
+      }
+
+      function renderCaps() {
+        const box = $("cap-list");
+        box.textContent = "";
+        const landed = new Map(((snap && snap.captures) || []).map((c) => [c.id, c]));
+        for (const c of caps.slice().reverse().slice(0, 8)) {
+          const l = landed.get("dc" + c.id);
+          let state, tone;
+          if (!c.sent) { state = "On phone — not sent yet"; tone = "amber"; }
+          else if (l) { state = "Filed: " + (l.summary || l.kind); tone = "ok"; }
+          else if (capFailed[c.id]) { state = "PC could not read this — type it with a price"; tone = "bad"; }
+          else { state = "Sent — waiting for the PC"; tone = ""; }
+          box.append(
+            el("div", { className: "task" }, [
+              el("div", { className: "txt" }, [
+                document.createTextNode(c.text || "(photo)"),
+                el("div", { className: "meta cap-" + tone }, [el("span", { textContent: state })]),
+              ]),
+            ]),
+          );
+        }
+        $("cap-list").hidden = !caps.length;
       }
 
       async function doSave() {
@@ -2009,10 +2082,17 @@
       $("view-checkin").onclick = () => setView("checkin");
       $("view-spend").onclick = () => setView("spend");
       $("spend-add").onclick = addSpend;
-      $("slip-file").addEventListener("change", (e) => {
-        const f = e.target.files && e.target.files[0];
-        e.target.value = "";
-        if (f) addSlip(f);
+      for (const id of ["slip-file", "cap-cam", "cap-pick"]) {
+        $(id).addEventListener("change", (e) => {
+          const f = e.target.files && e.target.files[0];
+          e.target.value = "";
+          // A photo sent with words in the box carries them along ("หาร 2", "กินกับแฟน").
+          if (f) addCapture(id === "slip-file" ? "" : $("cap-text").value, f);
+        });
+      }
+      $("cap-send").onclick = () => addCapture($("cap-text").value);
+      $("cap-text").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); addCapture($("cap-text").value); }
       });
 
       // Opened from a home-screen shortcut (?view=spend) or from Android's Share sheet (?shared=1,
@@ -2021,13 +2101,15 @@
         const q = new URLSearchParams(location.search);
         const v = q.get("view");
         if (v === "home" || v === "checkin" || v === "spend") view = v;
+        if (q.get("log")) setTimeout(() => $("cap-text").focus(), 300);
         if (q.get("shared") && "caches" in window) {
           try {
             const c = await caches.open("pocket-share");
             const hit = await c.match("shared-slip");
             if (hit) {
               await c.delete("shared-slip");
-              await addSlip(await hit.blob());
+              view = "home";
+              await addCapture("", await hit.blob());
             }
           } catch { /* nothing shared after all */ }
         }
